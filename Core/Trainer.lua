@@ -273,6 +273,11 @@ end
 
 function T.Train(list)
     if SW.CombatBlocked("train") then return end
+    -- what they just learned has to be believed immediately, or the guide asks for it again
+    C_Timer.After(0.5, function()
+        SW.Prof.ScanKnownSpells()
+        SW.Fire("RECIPES_CHANGED")
+    end)
     -- Highest index first: learning a service can shift the ones after it.
     table.sort(list, function(a, b) return a.index > b.index end)
     for _, svc in ipairs(list) do BuyTrainerService(svc.index) end

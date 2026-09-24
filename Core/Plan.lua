@@ -7,8 +7,20 @@ SW.Plan = Plan
 local cache = {}    -- [prof][mode] = route: both modes are kept, so the guide can say what the choice costs
 local jobs = {}     -- ["prof:mode"] = { prof, mode, co = coroutine, rank = the rank it was started from }
 
+local stale = {}      -- [prof][mode] = the route we were showing before a re-plan started
+
 local function Cached(prof, mode)
     local byMode = cache[prof]
+    return byMode and byMode[mode or SW.Settings().mode]
+end
+
+-- The route we had before the current re-plan. Opening a profession window scans it, which changes the
+-- known recipes and the ranks, which invalidates the plan - so the guide would blank to "working out
+-- your route..." for a few frames every single time. Showing the previous plan until the new one lands
+-- is both calmer and no less true: it is what we said a moment ago, and it is replaced the instant the
+-- real answer arrives.
+local function Stale(prof, mode)
+    local byMode = stale[prof]
     return byMode and byMode[mode or SW.Settings().mode]
 end
 
@@ -29,11 +41,13 @@ function Plan.Invalidate(prof)
     Plan.ForgetShopping(prof)
     Plan.ForgetOrange(prof)
     if prof then
+        if cache[prof] then stale[prof] = cache[prof] end
         cache[prof] = nil
         for key, job in pairs(jobs) do
             if job.prof == prof then jobs[key] = nil end
         end
     else
+        for p, byMode in pairs(cache) do stale[p] = byMode end
         wipe(cache)
         wipe(jobs)
     end
@@ -71,6 +85,7 @@ local function Drive()
                 jobs[key] = nil
                 if res then
                     Keep(prof, mode, res)
+                    if stale[prof] then stale[prof][mode] = nil end
                     if job.t then SW.dbg("solved %s (%s) from %d in %.0f ms", SW.ProfName(prof), mode, job.rank,
                         debugprofilestop() - job.t) end
                 end
@@ -134,6 +149,8 @@ function Plan.Options(prof, from)
         from = math.max(1, from or cp.rank or 1),
         to = cap,
         colors = db.colors,
+        -- no real market data: the cheapest route should not be decided to the copper on invented prices
+        pricesAreGuesses = SW.Prices.Status() == "none" or SW.Prices.Status() == "stale",
         mode = s.mode,
         known = cp.known,
         learnRanks = db.learnRanks,
@@ -246,6 +263,11 @@ function Plan.Route(prof, mode)
     -- the background, a few milliseconds per frame, while the guide says it is working.
     if SW.MAX_RANK - rank <= SYNC_SPAN then return Plan.RouteNow(prof, mode) end
     StartJob(prof, rank, mode)
+    -- rather than blanking the page for the few frames the new plan takes
+    local previous = Stale(prof, mode)
+    if previous and rank >= previous.from and (rank < previous.to or previous.to >= SW.MAX_RANK) then
+        return previous
+    end
     return nil
 end
 
@@ -275,7 +297,8 @@ function Plan.TradeOff(prof)
     local here, there = (mode == "fast") and fast or cheap, (mode == "fast") and cheap or fast
     local crafts, cost = here.crafts - there.crafts, there.cost - here.cost
     if crafts == 0 and math.abs(cost) < 100 then
-        return "Both routes come out the same from here."
+        return (mode == "cheap") and "Nothing cheaper exists here - the shortest route is also the cheapest."
+            or "Both routes come out the same from here."
     end
     local other = (mode == "fast") and "Cheapest" or "Fastest"
     local parts = {}
@@ -305,12 +328,19 @@ function Plan.Compare(prof)
             if s.to > rank then
                 local n = Plan.CraftsLeft(s, rank)
                 crafts = crafts + n
-                cost = cost + n * (s.costEach or 0)
+                cost = cost + n * Plan.StepCost(s)
             end
         end
         return { crafts = crafts, cost = cost, to = r.to }
     end
     return totals("cheap"), totals("fast")
+end
+
+-- Is the route we are showing planned without prices? True when any material has no vendor price and
+-- no auction price, which is most of them until the player scans.
+function Plan.PricesUnknown(prof)
+    local r = Plan.RouteIfReady(prof)
+    return r ~= nil and r.pricesUnknown == true
 end
 
 -- The route we already have, or nil. Never starts a solve: for callers that are only asking a question,
@@ -374,7 +404,7 @@ end
 
 -- crafts you could do right now from what you hold, and what the rest would cost to buy
 local function Affordability(opt, crafts)
-    local canMake, missing = nil, 0
+    local canMake, missing, unpriced = nil, 0, 0
     for i = 1, #opt.mats, 2 do
         local id, per = opt.mats[i], opt.mats[i + 1]
         local have = Plan.Count(id, true)
@@ -382,11 +412,12 @@ local function Affordability(opt, crafts)
         canMake = (canMake == nil or possible < canMake) and possible or canMake
         local short = math.max(0, per * crafts - have)
         if short > 0 then
-            local unit = SW.Prices.Market(id) or (SW.DB().vendor[id] or 0)
-            missing = missing + short * unit
+            -- a real price or none: a vendor price and an auction scan are facts, anything else is not
+            local unit = SW.Prices.Market(id) or SW.DB().vendor[id]
+            if unit then missing = missing + short * unit else unpriced = unpriced + 1 end
         end
     end
-    return canMake or 0, missing
+    return canMake or 0, missing, unpriced
 end
 
 -- The alternatives for the step the player is on, best first. Worked out once per profession, rank and
@@ -401,14 +432,16 @@ function Plan.Orange(prof, rank, to)
         -- what THIS recipe would take to carry the player to the same skill: an orange one needs fewer
         -- crafts than a yellow one, which is half of why the choice matters
         o.crafts = math.max(1, Plan.CraftsLeft({ from = rank, to = to, yellow = o.yellow, grey = o.grey }, rank))
-        o.canMake, o.missing = Affordability(o, o.crafts)
-        o.total = o.cost * o.crafts
+        o.canMake, o.missing, o.unpriced = Affordability(o, o.crafts)
+        o.total = o.cost and o.cost * o.crafts or nil
         o.chosen = Plan.Preferred(prof, o.spell) or nil
     end
     table.sort(list, function(a, b)
         if (a.chosen or false) ~= (b.chosen or false) then return a.chosen end
-        if a.missing ~= b.missing then return a.missing < b.missing end   -- cheapest to finish from here
-        if a.cost ~= b.cost then return a.cost < b.cost end               -- then cheapest outright
+        -- what we would still have to buy, when we know it; an unknown price never pretends to be cheap
+        if (a.unpriced or 0) ~= (b.unpriced or 0) then return (a.unpriced or 0) < (b.unpriced or 0) end
+        if a.missing ~= b.missing then return a.missing < b.missing end
+        if (a.cost or 0) ~= (b.cost or 0) then return (a.cost or 0) < (b.cost or 0) end
         return a.spell < b.spell
     end)
     orangeCache[prof] = { sig = sig, bags = Plan.bagSig, list = list }
@@ -439,7 +472,7 @@ local function StillGood(prof, spell, rank)
     local data = SW.Data.professions[prof]
     if not data then return nil end
     local cp = SW.CharProf(prof)
-    if not (cp.known and cp.known[spell]) then return nil end
+    if not SW.Prof.Knows(prof, spell) then return nil end
     for _, r in ipairs(data[2]) do
         if r[1] == spell then
             local colors = SW.DB().colors and SW.DB().colors[spell]
@@ -492,11 +525,25 @@ function Plan.Current(prof)
     if not step then return { route = route, done = true, rank = rank } end
     local left = math.max(1, Plan.CraftsLeft(step, rank))
 
-    -- Several known recipes can be orange at once (four Cooking recipes at skill 39, say). They all give
-    -- a guaranteed skill-up, so the one to SUGGEST is the one that costs least to finish from here, with
-    -- what is already in the bags counting as paid for. Once one is being followed it stays: only losing
-    -- its skill-ups, reaching its target, or the player choosing changes it.
-    local alts, swapped = nil, nil
+    -- What the character can actually make here: every recipe they KNOW that still gives skill, the
+    -- orange ones marked as guaranteed. The one to suggest is the one that costs least to finish from
+    -- here, with what is already in the bags counting as paid for; a guaranteed one wins a tie, because
+    --3 certain crafts beat 11 hopeful ones. Once one is being followed it stays: only losing its
+    -- skill-ups, reaching its target, or the player choosing changes it.
+    -- The route's own step may not be among them - it can be a recipe they have not learned yet - and
+    -- when that happens the card has to say so rather than quietly grinding something else.
+    -- Can the player simply go and learn what the route wants? Then that is the answer, and the card
+    -- must say so: substituting a grind for a recipe they could train right now hides the cheaper step.
+    -- Only when it is genuinely out of reach (needs more skill, or a rank they have not trained) does a
+    -- substitute become the honest suggestion.
+    local learnable
+    if not SW.Prof.Knows(prof, step.spell) and step.source ~= "r" then
+        local needs = step.learn or 1
+        local capOK = (SW.CharProf(prof).max or 0) <= 0 or needs <= (SW.CharProf(prof).max or 0)
+        learnable = rank >= needs and capOK
+    end
+
+    local alts, swapped, meanwhile = nil, nil, nil
     do
         alts = Plan.Orange(prof, rank, step.to)
         local active = Plan.Active(prof)
@@ -505,21 +552,38 @@ function Plan.Current(prof)
             active = nil
         end
         local pick
-        if active then
+        if learnable then
+            -- keep the route's step as the headline so the "go and learn this" panel fires; offer the
+            -- best thing they can make meanwhile as a second line, never as the instruction
+            pick = nil
+            local best
+            for _, o in ipairs(alts) do
+                if o.spell ~= step.spell and (not best or o.missing < best.missing) then best = o end
+            end
+            meanwhile = best
+        elseif active then
             for _, o in ipairs(alts) do
                 if o.spell == active.spell then pick = o break end
             end
             -- it may be out of the "orange" list only because we have no price for it: keep it anyway
             if not pick and StillGood(prof, active.spell, rank) then pick = { spell = active.spell } end
-        elseif #alts > 0 then
-            -- The planned recipe keeps the benefit of the doubt: another one only takes over when it
-            -- costs strictly less to finish from here, which is what holding the materials does.
-            local planned
-            for _, o in ipairs(alts) do
-                if o.spell == step.spell then planned = o break end
+        elseif #alts > 0 and not SW.Prof.Knows(prof, step.spell) then
+            -- THE ROUTE IS THE GUIDE. It already weighed price against the number of crafts, over the
+            -- whole way to 300; second-guessing it per step on "what would I still have to buy" is how
+            -- the card came to suggest 180 green Heavy Linen Bandages over 45 Wool Bandages - and to
+            -- claim they would carry the player to 115, when that recipe goes grey at 100.
+            -- So nothing is substituted while the route's own recipe can be made. When it cannot, the
+            -- best thing they CAN make is offered: guaranteed skill first, then fewest crafts, then what
+            -- they already hold the materials for.
+            local function worse(a, b)
+                if (a.guaranteed and 1 or 0) ~= (b.guaranteed and 1 or 0) then return not a.guaranteed end
+                if (a.crafts or 0) ~= (b.crafts or 0) then return (a.crafts or 0) > (b.crafts or 0) end
+                return a.missing > b.missing
             end
             local best = alts[1]
-            if planned and planned.missing <= best.missing then best = planned end
+            for _, o in ipairs(alts) do
+                if worse(best, o) then best = o end
+            end
             pick = best
             Plan.SetActive(prof, pick.spell, step.to)
         end
@@ -539,15 +603,29 @@ function Plan.Current(prof)
                 copy.mats = {}
                 for _, m in ipairs(pick.priced or {}) do
                     copy.mats[#copy.mats + 1] = { id = m.id, per = m.per, count = m.per * left,
-                                                  unit = m.unit, priceSource = m.priceSource }
+                                                  unit = m.unit, full = m.full or m.unit,
+                                                  priceSource = m.priceSource }
                 end
                 copy.vendorOnly, copy.haveMats = pick.vendorOnly, pick.haveMats
                 copy.alts, copy.chosenByPlayer = nil, Plan.Preferred(prof, pick.spell) or nil
+                -- what the route wanted here, and whether the player could learn it now
+                if not SW.Prof.Knows(prof, step.spell) then
+                    copy.blockedBy = { spell = step.spell, learn = step.learn, source = step.source,
+                                       learnEstimated = step.learnEstimated, crafts = step.crafts }
+                end
+                -- A substitute can only carry them as far as its own grey. Keeping the route's target
+                -- here promised "80 to 115" from a recipe that dies at 100.
+                copy.to = math.min(step.to, pick.grey or step.to)
+                copy.crafts = nil
                 step, swapped = copy, true
                 left = math.max(1, Plan.CraftsLeft(step, rank))
             end
         end
     end
+    -- Whatever ends up on the card - the route's own recipe or a substitute - is what the player is
+    -- following, and it stays theirs until it goes grey, finishes, or they pick another.
+    if not tool and step.spell then Plan.SetActive(prof, step.spell, step.to) end
+
     -- A tool still to make (or buy) comes first: the step can't be crafted without it.
     local tool = Plan.PendingTool(step)
     local srcMats = step.mats
@@ -561,14 +639,40 @@ function Plan.Current(prof)
         local have = Count(m.id, true)
         local bags = Count(m.id, false)
         mats[#mats + 1] = { id = m.id, per = m.per, need = need, have = have, bank = math.max(0, have - bags),
-                            short = math.max(0, need - have), unit = m.unit, priceSource = m.priceSource }
+                            short = math.max(0, need - have), unit = m.unit, full = m.full or m.unit,
+                            priceSource = m.priceSource }
         local can = math.floor(bags / m.per)
         craftable = craftable and math.min(craftable, can) or can
     end
+    -- Is this grind actually preparation? A step's product can be a material of a later one.
+    local feeds
+    if step.item and step.item > 0 and route then
+        for i = (idx or 1) + 1, #route.steps do
+            local later = route.steps[i]
+            for _, m in ipairs(later.mats or {}) do
+                if m.id == step.item then feeds = later.spell break end
+            end
+            if feeds then break end
+        end
+    end
+
+    -- What the player still has to buy, at real prices - the solver's own cost counts materials they
+    -- already hold as nearly free, which is right for choosing a recipe and wrong for a number on screen.
+    local enough, missingCost, unpricedMats = true, 0, 0
+    for _, m in ipairs(mats) do
+        if m.short > 0 then
+            enough = false
+            local unit = m.full or m.unit
+            if unit then missingCost = missingCost + m.short * unit else unpricedMats = unpricedMats + 1 end
+        end
+    end
+
     local craftSpell = tool and tool.spell or step.spell
     return {
         route = route, idx = idx, step = step, rank = rank, left = left, mats = mats, tool = tool,
-        orange = alts, swapped = swapped,
+        orange = alts, swapped = swapped, blockedBy = step.blockedBy, feeds = feeds,
+        enough = enough, missingCost = missingCost, unpricedMats = unpricedMats,
+        learnable = learnable, meanwhile = meanwhile,
         craftable = math.min(craftable or (tool and 1 or 0), left),
         known = craftSpell and SW.Prof.Knows(prof, craftSpell) or false,
         color = tool and tool.yellow and SW.Solver.Color(tool.yellow, tool.grey, rank)
@@ -624,7 +728,8 @@ function Plan.Shopping(prof)
                     g.order[#g.order + 1] = e
                 end
                 e.need = e.need + qty
-                g.cost = g.cost + qty * unit
+                -- only what we can actually price counts towards the total; the rest is listed, not guessed
+                if unit then g.cost = g.cost + qty * unit else g.unpriced = (g.unpriced or 0) + 1 end
             end
             for _, t in ipairs(s.prereqs or {}) do
                 if not SW.Solver.HasTool(t.category, owned) then
@@ -643,23 +748,43 @@ function Plan.Shopping(prof)
 end
 
 -- Totals for the rest of the route: crafts and gold still to spend.
+-- Shop price of one craft of a step, from the same materials the card lists.
+-- Shop price of one craft, plus whether every material in it had a price at all.
+function Plan.StepCost(step)
+    if not (step and step.mats) then return 0, true end
+    local sum, known = 0, true
+    for _, m in ipairs(step.mats) do
+        local unit = m.full or m.unit
+        if unit then sum = sum + (m.per or 0) * unit else known = false end
+    end
+    return sum, known
+end
+
 function Plan.Remaining(prof)
     local route = Plan.Route(prof)
     if not route then return 0, 0 end
     local rank = math.max(1, SW.Prof.Rank(prof))
     local owned = Plan.OwnedTools()
-    local crafts, cost = 0, 0
-    for _, s in ipairs(route.steps) do
+    local crafts, cost, priced = 0, 0, true
+    -- The step the guide is actually showing can differ from the route's own (a recipe they chose, or one
+    -- they can make while the route's is unlearned). Counting the route's version here made the card say
+    -- 180 crafts while the total said 98.
+    local cur = Plan.Current(prof)
+    local shown = cur and not cur.done and cur.step or nil
+    for i, s in ipairs(route.steps) do
         if rank < s.to then
+            if shown and i == cur.idx then s = shown end
             local n = rank > s.from and Plan.CraftsLeft(s, rank) or s.crafts
             crafts = crafts + n
-            cost = cost + n * s.costEach
+            local each, known = Plan.StepCost(s)
+            cost = cost + n * each
+            if not known then priced = false end
             for _, t in ipairs(s.prereqs or {}) do
                 if not SW.Solver.HasTool(t.category, owned) then cost = cost + (t.cost or 0) end
             end
         end
     end
-    return crafts, cost
+    return crafts, cost, priced
 end
 
 -- The next trainer tier to learn, when the rank is close to (or at) the current cap.

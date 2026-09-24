@@ -23,7 +23,11 @@ local VENDOR_BIAS = 2.5
 local FAST_VENDOR_PENALTY = 0.75
 -- Materials with no price at all (not sold by vendors, no auction data) may not be for sale anywhere - think
 -- enchanting essences, which only come from disenchanting. They count this many times their guessed price.
-local EST_BIAS = 4
+-- With no auction prices at all, "cheapest" is comparing guesses. Trusting a guess to three decimal
+-- places is how the route came to prefer 144 crafts of a three-material poultice over 45 bandages. When
+-- every price is estimated, each craft is also worth something - about five silver - so a route that is
+-- a third as long wins unless it is genuinely much dearer. Real prices switch this off entirely.
+
 -- Materials already in your bags or bank (opts.haveMats) count this fraction of their price: not free, so a
 -- small pile can't win a step that needs hundreds, but enough that using what you have wins a close call.
 local HAVE_DISCOUNT = 0.1
@@ -102,22 +106,22 @@ function Solver.NewPricer(prof, opts)
         local maker = makers[id]
         if maker and not busy[id] then
             busy[id] = true
-            local sum, mats = 0, maker[F_MATS]
-            for i = 1, #mats, 2 do sum = sum + mats[i + 1] * (pricer(mats[i])) end
+            local sum, mats, ok = 0, maker[F_MATS], true
+            for i = 1, #mats, 2 do
+                local u, usrc = pricer(mats[i])
+                if usrc == "unknown" or not u then ok = false break end
+                sum = sum + mats[i + 1] * u
+            end
             busy[id] = nil
-            sum = sum / max(1, maker[F_QTY])
-            if not best or sum < best then best, src = sum, "craft" end
+            if not ok then sum = nil end
+            if sum then
+                sum = sum / max(1, maker[F_QTY])
+                if not best or sum < best then best, src = sum, "craft" end
+            end
         end
-        if not best or src == "craft" then
-            -- no market data: a rough guess from the vendor sell price (also caps chains of crafted
-            -- intermediates, which multiply up quickly when their own inputs are guesses)
-            -- vendor sell prices are meaningless for some reagents (essences sell for 1c), so never
-            -- guess below a floor that grows with item level
-            local est = facts and max(1, facts[2] * 4, (facts[5] or 0) ^ 2 * 2) or 1000
-            if not best or est < best then best, src = est, "est" end
-        end
+        if not best then src = "unknown" end     -- no vendor, no auction, not craftable: we do not know
         -- already in the bags or bank (Plan decides what counts: enough of it, and not valuable or rare)
-        if opts.haveMats and opts.haveMats[id] then
+        if opts.haveMats and opts.haveMats[id] and best then
             best, src = best * HAVE_DISCOUNT, "have"
         end
         cache[id] = { best, src }
@@ -126,33 +130,38 @@ function Solver.NewPricer(prof, opts)
     return pricer
 end
 
--- Mats cost of one craft minus what the product sells to a vendor for (never below 10% of the mats).
--- Also returns whether every material comes from a vendor, and the cost weighted for "prefer vendor".
+-- What one craft costs, when we can say. Materials we have no price for (no vendor, no auction scan)
+-- make the whole answer unknown: `sum` and `weighted` come back nil rather than invented. Also returns
+-- whether every material comes from a vendor, and how many materials have no price at all.
 local function craftCost(r, price, preferVendor)
     local sum, vendorSum, weighted, mats = 0, 0, 0, r[F_MATS]
-    local haveAll = #mats > 0
+    local haveAll, unpriced = #mats > 0, 0
     for i = 1, #mats, 2 do
         local unit, src = price(mats[i])
-        local c = mats[i + 1] * unit
-        sum = sum + c
-        if src ~= "have" then haveAll = false end
-        if src == "vendor" or src == "have" then
-            vendorSum = vendorSum + c
-            weighted = weighted + c
-        elseif src == "est" then
-            weighted = weighted + c * EST_BIAS
+        if src == "unknown" or not unit then
+            unpriced = unpriced + 1
+            haveAll = false
         else
-            weighted = weighted + c * (preferVendor and VENDOR_BIAS or 1)
+            local c = mats[i + 1] * unit
+            sum = sum + c
+            if src ~= "have" then haveAll = false end
+            if src == "vendor" or src == "have" then
+                vendorSum = vendorSum + c
+                weighted = weighted + c
+            else
+                weighted = weighted + c * (preferVendor and VENDOR_BIAS or 1)
+            end
         end
     end
-    local vendorOnly = vendorSum >= sum
+    local vendorOnly = unpriced == 0 and vendorSum >= sum
     local facts = r[F_ITEM] > 0 and itemFacts(r[F_ITEM])
     if facts and not facts[4] then
         local resale = facts[2] * r[F_QTY]
         sum = max(sum - resale, sum * 0.1)
         weighted = max(weighted - resale, weighted * 0.1)
     end
-    return sum, vendorOnly, weighted, haveAll
+    if unpriced > 0 then return nil, vendorOnly, nil, haveAll, unpriced end
+    return sum, vendorOnly, weighted, haveAll, 0
 end
 
 ---------------------------------------------------------------------------------------------------- tools
@@ -194,6 +203,7 @@ function Solver.Interchangeable(prof, rank, opts)
                     for i = 1, #r[F_MATS], 2 do
                         local unit, src = price(r[F_MATS][i])
                         priced[#priced + 1] = { id = r[F_MATS][i], per = r[F_MATS][i + 1], unit = unit,
+                                                full = (src == "have") and (unit / HAVE_DISCOUNT) or unit,
                                                 priceSource = src }
                     end
                     out[#out + 1] = { spell = r[F_SPELL], item = r[F_ITEM], qty = r[F_QTY], mats = r[F_MATS],
@@ -266,11 +276,15 @@ function Solver.GapOptions(prof, rank, opts, price, limit)
             if learn <= rank and p >= 0.5 then
                 list[#list + 1] = { spell = r[F_SPELL], item = r[F_ITEM], source = r[F_SRC], recipeItem = r[F_RITEM],
                                     yellow = r[F_YELLOW], grey = r[F_GREY], learn = learn,
-                                    score = (craftCost(r, price)) / p }
+                                    -- no price for its materials: rank it by crafts, not by a guess
+                                    score = ((craftCost(r, price)) or 0) / p, cost = (craftCost(r, price)) }
             end
         end
     end
-    table.sort(list, function(a, b) return a.score < b.score end)
+    table.sort(list, function(a, b)
+        if a.score ~= b.score then return a.score < b.score end
+        return a.spell < b.spell
+    end)
     for i = (limit or 6) + 1, #list do list[i] = nil end
     return list
 end
@@ -285,7 +299,11 @@ local function matsOf(r, crafts, price)
     local out, mats = {}, r[F_MATS]
     for i = 1, #mats, 2 do
         local unit, src = price(mats[i])
-        out[#out + 1] = { id = mats[i], count = mats[i + 1] * crafts, per = mats[i + 1], unit = unit, priceSource = src }
+        -- `unit` is what the SOLVER paid (materials in the bags count as nearly free, which is right for
+        -- choosing between recipes); `full` is what the shop would charge, for anything shown to a player.
+        out[#out + 1] = { id = mats[i], count = mats[i + 1] * crafts, per = mats[i + 1], unit = unit,
+                          full = (src == "have") and unit and (unit / HAVE_DISCOUNT) or unit,
+                          priceSource = src }
     end
     return out
 end
@@ -310,13 +328,14 @@ function Solver.Solve(prof, opts)
     if not data then return nil end
     local from, to = opts.from or 1, opts.to or 300
     local fast = opts.mode == "fast"
+    local pricesUnknown = false
     local preferVendor = opts.preferVendor
     local price = Solver.NewPricer(prof, opts)
 
     local cands, bySpell, makers = {}, {}, {}
     for _, r in ipairs(data[2]) do
         if usable(r, opts) then
-            local cost, vendorOnly, weighted, haveAll = craftCost(r, price, preferVendor)
+            local cost, vendorOnly, weighted, haveAll, unpriced = craftCost(r, price, preferVendor)
             -- the skill each recipe needs and gives, worked out once: the rank loop below runs 300 times
             local learn = Solver.LearnRank(r, opts, false)
             local learnFB = Solver.LearnRank(r, opts, true)
@@ -327,6 +346,7 @@ function Solver.Solve(prof, opts)
             -- only guard numbers we learned in game: the datamined pairs may legitimately be equal
             if seen and grey <= yellow then grey = yellow + 1 end
             local c = { r = r, cost = cost, vendorOnly = vendorOnly, weight = weighted, haveMats = haveAll,
+                        unpriced = unpriced,
                         learn = learn, learnFB = learnFB, first = learn < learnFB and learn or learnFB,
                         yellow = yellow, grey = grey, ups = max(1, r[F_UPS]) }
             cands[#cands + 1] = c
@@ -349,7 +369,7 @@ function Solver.Solve(prof, opts)
             local key = ("%d:%d:%d:%d:%d:%s:%s"):format(c.learn, c.learnFB, c.yellow, c.grey, c.ups,
                 tools and #tools > 0 and table.concat(tools, ",") or "-", r[F_STATION])
             c.score = fast and (1 + ((preferVendor and not c.vendorOnly) and FAST_VENDOR_PENALTY or 0)
-                + c.weight * FAST_GOLD_WEIGHT) or c.weight
+                + (c.weight and c.weight * FAST_GOLD_WEIGHT or 0)) or (c.weight or math.huge)
             local g = groups[key]
             if not g then
                 g = { members = {} }
@@ -372,13 +392,26 @@ function Solver.Solve(prof, opts)
                         best.alts[#best.alts + 1] = { spell = c.r[F_SPELL], item = c.r[F_ITEM], cost = c.cost }
                     end
                 end
-                table.sort(best.alts, function(a, b) return a.cost < b.cost end)
+                -- a cost we do not know sorts last rather than throwing
+                table.sort(best.alts, function(a, b)
+                    if a.cost and b.cost then return a.cost < b.cost end
+                    if a.cost then return true end
+                    if b.cost then return false end
+                    return a.spell < b.spell
+                end)
                 best.chosenByPlayer = g.chosenByPlayer or nil
             end
             kept[#kept + 1] = best
         end
         cands = kept
     end
+    -- Can we price the field at all? Without an auction scan most materials have no price we know, and
+    -- "cheapest" would be a ranking of guesses. Then the honest plan is the one with the fewest crafts.
+    for _, c in ipairs(cands) do
+        if (c.unpriced or 0) > 0 then pricesUnknown = true break end
+    end
+    if pricesUnknown then fast = true end
+
     -- lowest skill needed first, so the loop can stop where the rest are still out of reach
     table.sort(cands, function(a, b)
         if a.first ~= b.first then return a.first < b.first end
@@ -413,7 +446,8 @@ function Solver.Solve(prof, opts)
         if not toolsOK(r, rank) then return nil end
         if fast then
             local extra = (preferVendor and not c.vendorOnly) and FAST_VENDOR_PENALTY or 0
-            return (1 + extra + c.weight * FAST_GOLD_WEIGHT) / p
+            local gold = c.weight and c.weight * FAST_GOLD_WEIGHT or 0
+            return (1 + extra + gold) / p
         end
         return c.weight / p
     end
@@ -529,15 +563,18 @@ function Solver.Solve(prof, opts)
         end
     end
 
+    local costKnown = true
     for _, s in ipairs(steps) do
         s.crafts = ceil(s.attempts - 1e-6)
-        s.cost = s.crafts * s.costEach
+        s.cost = s.costEach and s.crafts * s.costEach or nil
         s.mats = matsOf(bySpell[s.spell].r, s.crafts, price)
         s.prereqs = {}
         for _, cat in ipairs(s.tools or {}) do addTool(s.prereqs, cat, s.from) end
         total = total + s.crafts
-        cost = cost + s.cost
+        if s.cost then cost = cost + s.cost else costKnown = false end
         for _, t in ipairs(s.prereqs) do cost = cost + (t.cost or 0) end
     end
-    return { steps = steps, crafts = total, cost = cost, from = from, to = to, mode = opts.mode }
+    -- `cost` covers only what we could price; pricesUnknown says the rest exists and was not invented
+    return { steps = steps, crafts = total, cost = costKnown and cost or nil, knownCost = cost,
+             pricesUnknown = pricesUnknown or not costKnown, from = from, to = to, mode = opts.mode }
 end
