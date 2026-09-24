@@ -209,15 +209,26 @@ end
 
 function SW.Settings() return SW.DB().settings end
 
--- WoW: Forever sometimes fails to load saved variables. Everything we know - prices, the skill each
--- trainer recipe needs, the colours we learned, which recipe you were following - then starts empty, and
+-- WoW: Forever used to fail to load saved variables. Everything we know - prices, the skill each
+-- trainer recipe needs, the colours we learned, which recipe you were following - then started empty, and
 -- the guide would silently look as if the player had never used it. We say so instead, once.
 -- Nothing an addon can do preserves the file: the client rewrites it at logout either way.
+-- Client build 70009 fixed it. On a client that can no longer lose them, an empty store means a first
+-- install - saying anything about lost data there would be a lie to every new player. The library owns
+-- that judgement (LIB.SavedVariablesBugPossible); we never read the build ourselves, and an older
+-- embedded library without the check keeps behaving as before.
 SW.dataLost = false
 SW.Listen("LOGIN", function()
     local LIB = SW.LIB
     if not (LIB and LIB.Listen) then return end
+    -- Our two stores join the library's check: it compares several addons' tables before it decides, and
+    -- ours are the ones that matter to this guide.
+    if LIB.RegisterSavedTable then
+        LIB.RegisterSavedTable(SW.DB())
+        LIB.RegisterSavedTable(SW.CharDB())
+    end
     LIB.Listen("SAVED_VARIABLES_EMPTY", function()
+        if LIB.SavedVariablesBugPossible and not LIB.SavedVariablesBugPossible() then return end
         SW.dataLost = true
         SW.Fire("DATA_LOST")
     end)

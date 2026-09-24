@@ -20,10 +20,10 @@ local AltMenu   -- "or make this instead" (defined below, used by the Now view's
 -- and everything else is simply unknown until the player scans.
 local function NoPrice(src) return src == "unknown" or src == nil end
 
--- "12g 30s", or a plain dash when the price is not something we know.
-local function Cost(copper, estimated)
+-- "12g 30s", or plain words when the price is not something we know.
+local function Cost(copper, partial)
     if copper == nil then return "|cff8a8a8ano price|r" end
-    return (estimated and "|cff8a8a8apart|r " or "") .. SW.MoneyShort(copper)
+    return (partial and "|cff8a8a8aat least|r " or "") .. SW.MoneyShort(copper)
 end
 
 -- An item's name, while the client is still loading it, and if it never arrives.
@@ -38,9 +38,9 @@ end
 local CAMP_QUEST_HINT = "taught by the quest \"Camping 101\" from a camping NPC (not the trainer) once your "
     .. "skill is 20."
 
--- What "est." means right now: before any auction prices it's a hint to scan; after a scan, the item simply
--- wasn't listed (or Auctionator/TSM has no price for it).
-local function EstNote()
+-- Why part of a bill has no price: before any auction prices it's a hint to scan; after a scan, the item
+-- simply wasn't listed (or Auctionator/TSM has no price for it).
+local function NoPriceNote()
     local status = SW.Prices.Status()
     if status == "none" or status == "stale" then
         return "Only vendor prices are known. Open the auction house and press Scan prices for the rest."
@@ -716,7 +716,7 @@ local function RefreshNow(f)
         c.matsHead.line:Show()
         local perRow = math.max(1, math.floor((width - 8) / 64))
         local rowY = y - 6
-        local vendorBuy, bankLines, estimated = {}, {}, false
+        local vendorBuy, bankLines, partial = {}, {}, false
         for i, m in ipairs(cur.mats) do
             local cell = MatCell(c, i)
             local col, row = (i - 1) % perRow, math.floor((i - 1) / perRow)
@@ -733,7 +733,7 @@ local function RefreshNow(f)
             cell:Show()
             if m.short > 0 then SW.Prices.AddToBuy(vendorBuy, m.id, m.short, m.unit) end
             if m.bank > 0 then bankLines[#bankLines + 1] = ("%d %s"):format(m.bank, ItemText(m.id)) end
-            if NoPrice(m.priceSource) then estimated = true end
+            if NoPrice(m.priceSource) then partial = true end
         end
         local rows = math.ceil(#cur.mats / perRow)
         y = rowY - rows * 56
@@ -742,17 +742,18 @@ local function RefreshNow(f)
 
         local info = {}
         if tool then
-            info[#info + 1] = ("It costs about %s. You only need one."):format(Cost(tool.cost or 0, estimated))
+            info[#info + 1] = tool.cost and ("It costs about %s. You only need one."):format(SW.MoneyShort(tool.cost))
+                or "You only need one."
         else
             -- The honest number is what is still missing; the full cost of the step is the second half,
             -- because materials already in the bags are not spent again.
+            local unpricedNote = " |cff8a8a8a(only the materials we have a price for)|r"
             if not cur.enough and (cur.missingCost or 0) > 0 then
-                info[#info + 1] = ("Still to buy: about %s%s."):format(Cost(cur.missingCost, estimated),
-                    estimated and " |cff8a8a8a(some prices are estimates)|r" or "")
+                info[#info + 1] = ("Still to buy: %s%s."):format(Cost(cur.missingCost, partial),
+                    partial and unpricedNote or "")
             else
-                info[#info + 1] = ("This step costs about %s%s."):format(
-                    Cost(Plan.StepCost(s) * cur.left, estimated),
-                    estimated and " |cff8a8a8a(some prices are estimates)|r" or "")
+                info[#info + 1] = ("This step costs %s%s."):format(
+                    Cost(Plan.StepCost(s) * cur.left, partial), partial and unpricedNote or "")
             end
             -- Only say "from a vendor" when we actually know a vendor price for every material: a guess
             -- from an item's sell price is not a vendor, and saying so sends people shopping for ore.
@@ -971,13 +972,13 @@ local function RefreshRoute(f)
             r.bg:SetShown(current)
             r.icon:SetTexture(U.RecipeIcon(s.item, s.spell))
             r.range:SetText(("%d-%d"):format(s.from, s.to))
-            local est = false
-            for _, m in ipairs(s.mats) do if NoPrice(m.priceSource) then est = true end end
+            local partial = false
+            for _, m in ipairs(s.mats) do if NoPrice(m.priceSource) then partial = true end end
             local known = SW.Prof.Knows(prof, s.spell)
             r.text:SetText((known and "" or "|cffff8040*|r ") .. U.RecipeName(s.spell) .. " " .. SourceTag(s.source)
                 .. MatsTag(s))
             local crafts = current and Plan.CraftsLeft(s, rank) or s.crafts
-            r.right:SetText(("x%d  %s"):format(crafts, Cost(crafts * Plan.StepCost(s), est)))
+            r.right:SetText(("x%d  %s"):format(crafts, Cost(crafts * Plan.StepCost(s), partial)))
             r.tipItem, r.tipSpell, r.tipExtra = s.item, s.spell, StepTooltip(s)
             r:ClearAllPoints()
             r:SetPoint("TOPLEFT", c, "TOPLEFT", 0, y)
@@ -1025,18 +1026,24 @@ local function RefreshShop(f)
     HidePool(f.rows, 1)
     for _, h in ipairs(f.heads) do h:Hide(); h.line:Hide() end
     local groups = Plan.Shopping(prof)
-    local y, n, nh, total, est = -2, 0, 0, 0, false
+    local y, n, nh, total, partial = -2, 0, 0, 0, false
     local buyList = {}
     for _, g in ipairs(groups) do
         nh = nh + 1
         local h = f.heads[nh]
         if not h then h = U.Heading(c, ""); f.heads[nh] = h end
-        h:SetText(("%s |cff8a8a8a(to %d)|r  %s"):format(g.tier.name, g.tier.cap, SW.MoneyShort(g.cost)))
+        h:SetText(("%s |cff8a8a8a(to %d)|r  %s"):format(g.tier.name, g.tier.cap,
+            Cost(g.cost, (g.unpriced or 0) > 0)))
         h:ClearAllPoints()
         h:SetPoint("TOPLEFT", c, "TOPLEFT", 2, y - 6)
         h:Show(); h.line:Show()
         y = y - 26
-        table.sort(g.order, function(a, b) return a.need * a.unit > b.need * b.unit end)
+        -- dearest first, and the ones we cannot price last: they still have to be bought.
+        table.sort(g.order, function(a, b)
+            local av, bv = a.unit and a.need * a.unit or -1, b.unit and b.need * b.unit or -1
+            if av ~= bv then return av > bv end
+            return a.need > b.need
+        end)
         for _, e in ipairs(g.order) do
             n = n + 1
             local r = LineRow(c, f.rows, n)
@@ -1049,8 +1056,10 @@ local function RefreshShop(f)
             r.tipExtra = function(tt)
                 tt:AddLine(" ")
                 tt:AddDoubleLine("Have / need", ("%d / %d"):format(e.have, e.need), 1, 0.82, 0.3, 1, 1, 1)
-                local src = ({ ah = "auction house", vendor = "vendor", craft = "made from its own materials", est = "estimate - no price data" })[e.priceSource] or e.priceSource
-                tt:AddDoubleLine("Price each", SW.MoneyShort(e.unit), 0.7, 0.7, 0.7, 1, 1, 1)
+                local src = ({ ah = "auction house", vendor = "vendor", craft = "made from its own materials",
+                    unknown = "no price yet - scan the auction house" })[e.priceSource] or e.priceSource
+                tt:AddDoubleLine("Price each", e.unit and SW.MoneyShort(e.unit) or "|cff8a8a8ano price|r",
+                    0.7, 0.7, 0.7, 1, 1, 1)
                 tt:AddLine("Source: " .. src, 0.6, 0.6, 0.6)
             end
             r:ClearAllPoints()
@@ -1058,8 +1067,8 @@ local function RefreshShop(f)
             r:SetPoint("RIGHT", c, "RIGHT", -2, 0)
             r:Show()
             y = y - 21
-            total = total + e.need * e.unit
-            if Est(e.priceSource) then est = true end
+            if e.unit then total = total + e.need * e.unit end
+            if NoPrice(e.priceSource) then partial = true end
             if e.short > 0 then SW.Prices.AddToBuy(buyList, e.id, e.short, e.unit) end
         end
     end
@@ -1086,8 +1095,8 @@ local function RefreshShop(f)
     else
         f.trade:Hide()
     end
-    f.total:SetText(("Total: %s%s"):format(Cost(total, est),
-        est and ("\n|cff8a8a8a" .. EstNote() .. "|r") or ""))
+    f.total:SetText(("Total: %s%s"):format(Cost(total, partial),
+        partial and ("\n|cff8a8a8a" .. NoPriceNote() .. "|r") or ""))
     f.total:ClearAllPoints()
     f.total:SetPoint("TOPLEFT", c, "TOPLEFT", 4, y - 10)
     f.total:SetWidth(c:GetWidth() - 10)
@@ -1290,7 +1299,7 @@ local function UpdateDashboard()
     return true
 end
 
--- The strip that says costs are estimates until there are auction prices; the body moves down under it.
+-- The strip that says there are no auction prices yet; the body moves down under it.
 local function UpdatePriceNote()
     local note, status = win.priceNote, SW.Prices.Status()
     local text
@@ -1305,7 +1314,7 @@ local function UpdatePriceNote()
     if win.view ~= "settings" and (status == "none" or status == "stale") then
         local atAH = SW.Prices.CanScan()
         if status == "stale" then
-            text = ("|cffffd100Auction prices are out of date|r (scanned %s), so costs are estimates again. %s")
+            text = ("|cffffd100Auction prices are out of date|r (scanned %s), so the gold numbers may be wrong. %s")
                 :format(SW.Prices.Ago(SW.DB().ahScanned), atAH and "Press |cffffd100Scan prices|r below."
                     or "Scan again at the auction house.")
         else
@@ -1366,7 +1375,8 @@ local function Refresh()
     if v and v.frame then v.refresh(v.frame) end
     -- Footer: where prices come from, and the scan button at the auction house.
     local src = SW.Prices.SourceText()
-    win.status:SetText(src and ("|cff8a8a8aPrices:|r " .. src) or "|cff8a8a8aPrices: estimated (no auction data)|r")
+    win.status:SetText(src and ("|cff8a8a8aPrices:|r " .. src)
+        or "|cff8a8a8aPrices: vendors only - nothing else is priced until you scan|r")
     win.scan:SetShown(SW.Prices.CanScan() and true or false)
     win.status:SetPoint("RIGHT", win.scan:IsShown() and win.scan or win, win.scan:IsShown() and "LEFT" or "RIGHT", win.scan:IsShown() and -8 or -18, 0)
     win.scan:SetEnabled(not SW.Prices.Scanning())
@@ -1559,7 +1569,7 @@ local function Build()
     win.body:SetPoint("TOPLEFT", 16, -98)
     win.body:SetPoint("BOTTOMRIGHT", -12, 40)
 
-    -- "No auction prices yet": a strip above the tabs' content while costs are estimates
+    -- "No auction prices yet": a strip above the tabs' content while there is nothing to cost a route with
     local note = CreateFrame("Frame", nil, win)
     note:SetPoint("TOPLEFT", 16, -96)
     note:SetPoint("RIGHT", win, "RIGHT", -14, 0)
@@ -1590,7 +1600,9 @@ local function Build()
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
         GameTooltip:AddLine("Prices", 1, 0.82, 0.3)
         local src = SW.Prices.SourceText()
-        GameTooltip:AddLine(src and ("From: " .. src) or "No auction prices yet, so materials that aren't sold by vendors are estimated.", 0.85, 0.85, 0.85, true)
+        GameTooltip:AddLine(src and ("From: " .. src)
+            or "No auction prices yet. Vendor prices are used where we know them; nothing else is priced.",
+            0.85, 0.85, 0.85, true)
         GameTooltip:AddLine("Open the auction house and press Scan prices, or install Auctionator or TSM.", 0.7, 0.7, 0.7, true)
         GameTooltip:Show()
     end)

@@ -52,7 +52,7 @@ SW.Listen("LOGIN", function()
         title = "Skillwright",
         subtitle = "The cheapest or fastest route to max profession skill.",
         blurb = "Plans your profession to 300: what to craft, how many and what it costs.",
-        -- Without auction prices every cost is an estimate, and one scan fixes it.
+        -- Without auction prices only vendor materials can be costed, and one scan fixes that.
         needsSetup = function() return not SW.dataLost and SW.Prices.Status() == "none" end,
         reason = "no auction prices yet - scan at the auction house",
         setupLabel = "Scan prices",

@@ -141,7 +141,7 @@ local function Finish(rows)
     -- Prices older than a month are never used again (the setting caps them at days): drop them so the
     -- saved table can't grow for ever.
     local cutoff = now - KEEP_PRICES
-    for id, e in pairs(SW.dataLost and {} or ah) do
+    for id, e in pairs(ah) do
         if type(e) ~= "table" or not e[2] or e[2] < cutoff then ah[id] = nil end
     end
     SW.DB().ahScanned = now

@@ -736,11 +736,11 @@ function Plan.Shopping(prof)
                     if t.buy then
                         add(t.item, 1, t.cost or 0, "vendor")
                     else
-                        for _, m in ipairs(t.mats) do add(m.id, m.per, m.unit, m.priceSource) end
+                        for _, m in ipairs(t.mats) do add(m.id, m.per, m.full or m.unit, m.priceSource) end
                     end
                 end
             end
-            for _, m in ipairs(s.mats) do add(m.id, m.per * crafts, m.unit, m.priceSource) end
+            for _, m in ipairs(s.mats) do add(m.id, m.per * crafts, m.full or m.unit, m.priceSource) end
         end
     end
     shopCache[prof] = { route = route, rank = rank, groups = groups }

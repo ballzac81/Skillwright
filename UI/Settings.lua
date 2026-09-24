@@ -128,7 +128,8 @@ function Page.Build(f)
     -- How it works, and what it can't know yet
     heading("Good to know")
     text("|cffffd100Prices|r come from Auctionator or TSM when installed, else from your own scan: open the "
-        .. "auction house and press |cffffd100Scan prices|r. Without any, prices are estimates (marked est.).",
+        .. "auction house and press |cffffd100Scan prices|r. Without them only vendor prices are known - "
+        .. "nothing else is guessed, and the guide shows the shortest route instead of the cheapest.",
         nil, 4, 6)
     text("|cffffd100Trainer recipes:|r the game doesn't say what skill one needs until you see it at a trainer. "
         .. "Until then the plan estimates it (marked estimated).", nil, 4, 6)

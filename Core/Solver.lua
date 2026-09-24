@@ -21,12 +21,9 @@ local FAST_GOLD_WEIGHT = 1 / (20 * 10000) -- fast mode: 20g of mats counts as on
 -- and in fast mode each craft that needs them counts as this many extra crafts.
 local VENDOR_BIAS = 2.5
 local FAST_VENDOR_PENALTY = 0.75
--- Materials with no price at all (not sold by vendors, no auction data) may not be for sale anywhere - think
--- enchanting essences, which only come from disenchanting. They count this many times their guessed price.
--- With no auction prices at all, "cheapest" is comparing guesses. Trusting a guess to three decimal
--- places is how the route came to prefer 144 crafts of a three-material poultice over 45 bandages. When
--- every price is estimated, each craft is also worth something - about five silver - so a route that is
--- a third as long wins unless it is genuinely much dearer. Real prices switch this off entirely.
+-- A material with no vendor price and no auction price has no price here either: nothing is guessed from
+-- its sell price. A route that needs one cannot be costed, so "cheapest" has nothing to compare and the
+-- guide shows the shortest route instead until the player scans.
 
 -- Materials already in your bags or bank (opts.haveMats) count this fraction of their price: not free, so a
 -- small pile can't win a step that needs hundreds, but enough that using what you have wins a close call.
@@ -84,7 +81,7 @@ end
 
 ---------------------------------------------------------------------------------------------------- prices
 
--- Price of one unit, in copper, plus where it came from: "ah", "vendor", "craft" or "est".
+-- Price of one unit, in copper, plus where it came from: "ah", "vendor", "craft" or "unknown".
 -- opts.market(id) -> copper|nil is the live market price (auction scan, Auctionator, TSM ...).
 function Solver.NewPricer(prof, opts)
     local cache, busy = {}, {}
