@@ -610,6 +610,10 @@ function Plan.Current(prof)
                                                   priceSource = m.priceSource }
                 end
                 copy.vendorOnly, copy.haveMats = pick.vendorOnly, pick.haveMats
+                -- and how it is described: these belonged to the recipe being replaced
+                copy.source, copy.recipeItem = pick.source or copy.source, pick.recipeItem
+                copy.station, copy.tools = pick.station, pick.tools or copy.tools
+                copy.learn, copy.learnEstimated = pick.learn or copy.learn, pick.learnEstimated
                 copy.alts, copy.chosenByPlayer = nil, Plan.Preferred(prof, pick.spell) or nil
                 -- what the route wanted here, and whether the player could learn it now
                 if not SW.Prof.Knows(prof, step.spell) then
@@ -619,7 +623,10 @@ function Plan.Current(prof)
                 -- A substitute can only carry them as far as its own grey. Keeping the route's target
                 -- here promised "80 to 115" from a recipe that dies at 100.
                 copy.to = math.min(step.to, pick.grey or step.to)
-                copy.crafts = nil
+                -- Its own count, over its own range: the route's belonged to the recipe it replaced.
+                -- Leaving this nil put a hole in a table everything else treats as a route step, and
+                -- Plan.Remaining hit it the day a swap happened at exactly the step's first rank.
+                copy.crafts = Plan.CraftsLeft(copy, copy.from)
                 step, swapped = copy, true
                 left = math.max(1, Plan.CraftsLeft(step, rank))
             end
@@ -722,7 +729,7 @@ function Plan.Shopping(prof)
                 byTier[tier.cap] = g
                 groups[#groups + 1] = g
             end
-            local crafts = rank > s.from and Plan.CraftsLeft(s, rank) or s.crafts
+            local crafts = rank >= s.from and Plan.CraftsLeft(s, rank) or s.crafts
             local function add(id, qty, unit, src)
                 local e = g.mats[id]
                 if not e then
@@ -777,7 +784,7 @@ function Plan.Remaining(prof)
     for i, s in ipairs(route.steps) do
         if rank < s.to then
             if shown and i == cur.idx then s = shown end
-            local n = rank > s.from and Plan.CraftsLeft(s, rank) or s.crafts
+            local n = rank >= s.from and Plan.CraftsLeft(s, rank) or s.crafts
             crafts = crafts + n
             local each, known = Plan.StepCost(s)
             cost = cost + n * each

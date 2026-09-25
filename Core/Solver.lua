@@ -203,10 +203,15 @@ function Solver.Interchangeable(prof, rank, opts)
                                                 full = (src == "have") and (unit / HAVE_DISCOUNT) or unit,
                                                 priceSource = src }
                     end
+                    local learn, learnEst = Solver.LearnRank(r, opts)
                     out[#out + 1] = { spell = r[F_SPELL], item = r[F_ITEM], qty = r[F_QTY], mats = r[F_MATS],
                                       cost = cost, ups = max(1, r[F_UPS]), vendorOnly = vendorOnly,
                                       yellow = yellow, grey = grey, guaranteed = rank < yellow or nil,
-                                      priced = priced, vendorOnly = vendorOnly, haveMats = haveAll }
+                                      priced = priced, haveMats = haveAll,
+                                      -- what it IS, so a card showing it does not describe the recipe
+                                      -- it replaced: where it comes from, what it needs, what it uses
+                                      source = r[F_SRC], recipeItem = r[F_RITEM], station = r[F_STATION],
+                                      tools = r[F_TOOLS], learn = learn, learnEstimated = learnEst }
                 end
             end
         end
