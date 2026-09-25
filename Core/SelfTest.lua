@@ -68,7 +68,7 @@ function T.Run()
         end)
         Check(results, name .. ": alternatives", function()
             local rank = math.max(1, SW.Prof.Rank(prof))
-            local to = (cur and cur.step and cur.step.to) or SW.MAX_RANK
+            local to = (cur and cur.step and cur.step.to) or SW.Ceiling(prof)
             for _, o in ipairs(SW.Plan.Orange(prof, rank, to)) do
                 assert(o.spell, "an alternative without a recipe")
                 assert(o.crafts and o.canMake ~= nil and o.missing ~= nil, "an alternative without its numbers")
@@ -90,6 +90,15 @@ function T.Run()
             if SW.TrainerHint then SW.TrainerHint(prof, "Expert") end
         end)
     end
+
+    Check(results, "how far each profession goes", function()
+        for _, prof in ipairs(SW.Prof.All()) do
+            assert(SW.Ceiling(prof) > 0, "no ceiling for " .. SW.ProfName(prof))
+            SW.CapSeen(prof)
+            SW.Plan.Boundaries(prof)
+            SW.Plan.Rows(prof)
+        end
+    end)
 
     Check(results, "disenchanting", function()
         local DE = SW.Disenchant

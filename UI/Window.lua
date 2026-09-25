@@ -689,12 +689,13 @@ local function RefreshNow(f)
             c.alts:Hide()
         end
 
-        -- The route stops at the rank the character can reach, so say what lifts it - and, for the ranks
-        -- that come from a book or a quest rather than a trainer, say that instead of "at a trainer".
+        -- The route runs the whole profession now, so what stops is the character, not the plan. Say
+        -- which rank they are held at and what lifts it - and, for the ranks that come from a book or a
+        -- quest rather than a trainer, say that instead of "at a trainer".
         local capText
         local due = have and Plan.TrainingDue(prof)
         local capped = have and route and route.to and (cp.max or 0) > 0 and route.to >= cp.max
-            and cp.max < SW.MAX_RANK
+            and cp.max < SW.Ceiling(prof)
         if due or capped then
             local tier = due
             if not tier then
@@ -706,8 +707,9 @@ local function RefreshNow(f)
             local hint = SW.TrainerHint and tier and SW.TrainerHint(prof, tier.name)
             local need = tier and tier.need and (cp.rank or 0) < tier.need
                 and (" |cff8a8a8a(needs skill %d)|r"):format(tier.need) or ""
-            c.warn:SetText(("|cffff6060The route stops at %d.|r Learn |cffffd100%s %s|r to go further.%s%s"):format(
-                cp.max, name, SW.ProfName(prof), need, hint and ("\n|cff8a8a8a" .. hint .. "|r") or ""))
+            c.warn:SetText(("|cffff6060Your skill stops at %d until you train.|r Learn |cffffd100%s %s|r "
+                .. "to go further.%s%s"):format(cp.max, name, SW.ProfName(prof), need,
+                hint and ("\n|cff8a8a8a" .. hint .. "|r") or ""))
             capText = true                               -- drawn further down, with the rest of the route
         end
 
@@ -946,8 +948,36 @@ local function RefreshRoute(f)
     local rank = math.max(1, SW.Prof.Rank(prof))
     local y, n = -2, 0
     local owned = Plan.OwnedTools()
-    for _, s in ipairs(route.steps) do
-        if s.to > rank then
+    for _, row in ipairs(Plan.Rows(prof) or {}) do
+        -- A trainer visit is a step of the route: it is the thing to do next when you reach that rank.
+        if row.train and row.train.at > rank then
+            local b = row.train
+            n = n + 1
+            local r = RouteRow(f, n)
+            r.bg:Hide()
+            r.icon:SetTexture("Interface\\Icons\\INV_Misc_Book_09")
+            r.range:SetText(("|cffffd100%d|r"):format(b.at))
+            local hint = b.name and SW.TrainerHint and SW.TrainerHint(prof, b.name)
+            r.text:SetText(("|cffffd100Train %s %s|r%s"):format(b.name or "the next rank", SW.ProfName(prof),
+                hint and ("  |cff8a8a8a" .. hint .. "|r") or ""))
+            r.right:SetText(b.need and ("|cff8a8a8aneeds skill %d|r"):format(b.need) or "")
+            r.tipItem, r.tipSpell, r.tipExtra = nil, nil, function(tt)
+                tt:AddLine(("Train %s %s"):format(b.name or "the next rank", SW.ProfName(prof)), 1, 0.82, 0.3)
+                tt:AddLine(("Your skill stops at %d until you do."):format(b.at), 0.85, 0.85, 0.85, true)
+                if not b.name then
+                    tt:AddLine("WoW: Forever adds a rank above Artisan. The client data does not say what "
+                        .. "it is called or how far it goes, so Skillwright will not guess - it plans as "
+                        .. "far as the recipes reach.", 0.6, 0.6, 0.6, true)
+                end
+            end
+            r:ClearAllPoints()
+            r:SetPoint("TOPLEFT", c, "TOPLEFT", 0, y)
+            r:SetPoint("RIGHT", c, "RIGHT", -2, 0)
+            r:Show()
+            y = y - ROW - 1
+        end
+        local s = row.step
+        if s and s.to > rank then
             -- tools this step needs that you don't have yet
             for _, t in ipairs(s.prereqs or {}) do
                 if not SW.Solver.HasTool(t.category, owned) then
@@ -987,7 +1017,13 @@ local function RefreshRoute(f)
             y = y - ROW - 1
         end
     end
-    local notes = { "|cffff8040*|r not learned yet.  |cff8a8a8apart|r = some materials have no known price." }
+    local notes = { "|cffff8040*|r not learned yet.  |cff8a8a8aat least|r = some materials have no known price." }
+    -- Where the plan ends, and why that number and not another one.
+    local ceiling = SW.Ceiling(prof)
+    notes[#notes + 1] = ceiling > SW.MAX_RANK
+        and ("Planned to |cffffd100%d|r: a character here has reached that, past the 300 the game data stops at.")
+            :format(ceiling)
+        or "Planned to |cffffd100300|r, the highest skill any recipe in this build needs."
     if route.gapAt then
         notes[#notes + 1] = ("The route ends at |cffffd100%d|r: no trainer recipe gives skill past that. See Now for recipes that would."):format(route.gapAt)
     end
@@ -1095,8 +1131,18 @@ local function RefreshShop(f)
     else
         f.trade:Hide()
     end
+    -- How much of the bill we cannot see matters more the longer the route is: on a full 1-350 plan
+    -- "at least 40g" can be a tenth of the truth, and the count is the only honest way to say so.
+    local unpricedItems, allItems = 0, 0
+    for _, g in ipairs(groups) do
+        for _, e in ipairs(g.order) do
+            allItems = allItems + 1
+            if not e.unit then unpricedItems = unpricedItems + 1 end
+        end
+    end
     f.total:SetText(("Total: %s%s"):format(Cost(total, partial),
-        partial and ("\n|cff8a8a8a" .. NoPriceNote() .. "|r") or ""))
+        partial and ("\n|cff8a8a8a%d of the %d materials have no price. %s|r"):format(
+            unpricedItems, allItems, NoPriceNote()) or ""))
     f.total:ClearAllPoints()
     f.total:SetPoint("TOPLEFT", c, "TOPLEFT", 4, y - 10)
     f.total:SetWidth(c:GetWidth() - 10)

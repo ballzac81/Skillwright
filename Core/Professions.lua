@@ -41,6 +41,17 @@ function P.ScanRanks()
                     p.has, p.rank, p.max = true, s.rank, s.maxRank or 0
                     changed = true
                 end
+                -- The canary for the day 300 stops being the end (SW.Ceiling). Account-wide and only
+                -- upwards: one character at Journeyman must not lower what another has shown us.
+                local caps = SW.DB().caps
+                if (s.maxRank or 0) > (caps[id] or 0) then
+                    caps[id] = s.maxRank
+                    if s.maxRank > SW.MAX_RANK and not SW.DB().capNoticed then
+                        SW.DB().capNoticed = true
+                        SW.msg("|cffffd100%s goes to %d here|r - higher than the 300 every recipe in the "
+                            .. "game data stops at. Skillwright will plan that far.", SW.ProfName(id), s.maxRank)
+                    end
+                end
             elseif p.has then
                 -- Forgotten at a trainer. `known` MUST be cleared here, together with has and rank:
                 -- P.Knows falls back to this table when the client says no, so a leftover entry would

@@ -29,14 +29,41 @@ SW.PROFESSIONS = {
 SW.ALL_LINES = { [164] = true, [165] = true, [171] = true, [182] = true, [185] = true, [186] = true,
                  [197] = true, [202] = true, [333] = true, [356] = true, [393] = true, [129] = true }
 
--- Vanilla trainer tiers: the rank cap each one lifts and the skill needed to learn it.
+-- The four vanilla trainer tiers: the rank cap each one lifts to and the skill needed to learn it.
+-- WoW: Forever adds a FIFTH rank above Artisan - every profession has a child skill line at
+-- ParentTierIndex 4 with four rank spells of its own - and its cap is not in the client data. Nothing
+-- here may pretend to know it.
 SW.TIERS = {
     { cap = 75, name = "Apprentice", need = 1 },
     { cap = 150, name = "Journeyman", need = 50 },
     { cap = 225, name = "Expert", need = 125 },
     { cap = 300, name = "Artisan", need = 200 },
 }
+
+-- 300 is the end of a profession, and this is not an assumption carried over from Classic - it is what
+-- this build's own data says. Of the recipes we ship, the highest skill any of them needs to be LEARNED
+-- is 300, and not one needs more. 520 of them have a grey rank above 300, which is the ordinary Classic
+-- shape of a top recipe: it stays yellow all the way to the cap instead of going grey before it. Grey is
+-- not reach. Forever's data also carries a fifth skill line per profession (a child line at
+-- ParentTierIndex 4 with four rank spells), but those lines have no abilities at all, so it is the retail
+-- data model coming along with the code, not content. SkillTiers, which would state a tier's maximum
+-- rank outright, is in none of the four builds we have.
 SW.MAX_RANK = 300
+
+-- How far to plan. 300, unless a real character has stood higher than that: if Forever ever turns the
+-- fifth rank on, a maxRank above 300 is the first place it will show, and we would rather follow the
+-- game than our own table. A canary, not a source - see SW.CapSeen.
+function SW.Ceiling(prof)
+    local seen = SW.CapSeen(prof) or 0
+    return seen > SW.MAX_RANK and seen or SW.MAX_RANK
+end
+
+-- The highest maxRank any character on this account has reached in a profession, recorded as we see it
+-- (Professions.ScanRanks). It exists to catch the day the answer above stops being true: nothing in the
+-- client data would tell us, so the game itself has to.
+function SW.CapSeen(prof)
+    return (SW.DB().caps or {})[prof]
+end
 
 function SW.ProfName(id)
     local db = SW.DB()
@@ -189,6 +216,7 @@ local DEFAULTS = {
     ah = {},                     -- [itemID] = { unitPrice, scannedAt }
     ahScanned = 0,
     profNames = {},              -- [skillLineID] = localized name
+    caps = {},                   -- [skillLineID] = the highest maxRank any character here has reached
 }
 
 -- Defaults are filled in once per saved table (not on every call: this runs in sort comparators).

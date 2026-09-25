@@ -315,6 +315,7 @@ end
 --   market        function(item) -> copper|nil
 --   haveMats      { [item] = true } materials already in the bags or bank, worth counting as good as owned
 --   owned         { [item] = true } tools the character already has
+--   breaks        { [rank] = true } ranks no step may run through (trainer visits)
 --   allowCamp     include recipes that need a camp station
 -- Returns { steps = { step, ... }, crafts = n, cost = copper, gapAt = rank|nil }
 -- step = { from, to, spell, item, qty, crafts, mats = { {id, count, per, unit, priceSource}, ... }, cost, source,
@@ -457,6 +458,23 @@ function Solver.Solve(prof, opts)
     -- opts.yield (set when the plan is solved in the background) is called every so often so a long route
     -- can be spread over several frames instead of freezing one.
     local yield, sinceYield = opts.yield, 0
+    -- Ranks a step may not run through: the trainer visits. A run of one recipe that spans 75 would put
+    -- "70-90 Rough Grinding Stone" on the page with the visit hidden somewhere inside it. Ending the run
+    -- at the cap costs one switch and makes the list readable in the order you do it. nextBreak[rank] is
+    -- the first cap above that rank, so a craft that jumps over one (three skill points from 74 to 77)
+    -- still ends its run there.
+    local breaksAt = opts.breaks or {}
+    local nextBreak = {}
+    do
+        local caps = {}
+        for rank in pairs(opts.breaks or {}) do caps[#caps + 1] = rank end
+        table.sort(caps)
+        local i = 1
+        for rank = 0, to do
+            while caps[i] and caps[i] <= rank do i = i + 1 end
+            nextBreak[rank] = caps[i]
+        end
+    end
     for rank = to - 1, from, -1 do
         if yield then
             sinceYield = sinceYield + 1
@@ -474,12 +492,14 @@ function Solver.Solve(prof, opts)
                 local c = cands[ci]
                 local sc = stepCost(c, rank, fallback)
                 if sc then
-                    local nxt = min(rank + c.ups, to)
+                    local cap = nextBreak[rank]
+                    local nxt = min(rank + c.ups, cap or to, to)
                     local tail
                     if nxt >= to then
                         tail = 0
                     else
-                        local stay = f[nxt] and f[nxt][ci]
+                        -- at a cap the run is over, whatever continuing would have cost
+                        local stay = not (cap and nxt >= cap) and f[nxt] and f[nxt][ci]
                         local switch = best[nxt] + SWITCH_PENALTY * bestStep[nxt]
                         tail = (stay and stay < switch) and stay or switch
                     end
@@ -519,7 +539,7 @@ function Solver.Solve(prof, opts)
         local p = Solver.Chance(c.yellow, c.grey, rank)
         local ups = c.ups
         local step = steps[#steps]
-        if pick ~= cur or not step then
+        if pick ~= cur or not step or breaksAt[rank] then
             local learn, est = Solver.LearnRank(r, opts, fb[rank])
             step = { from = rank, to = rank, spell = r[F_SPELL], item = r[F_ITEM], qty = r[F_QTY],
                      yellow = c.yellow, grey = c.grey, source = r[F_SRC], recipeItem = r[F_RITEM],
@@ -530,7 +550,7 @@ function Solver.Solve(prof, opts)
             steps[#steps + 1] = step
         end
         step.attempts = step.attempts + 1 / p
-        rank = min(rank + ups, to)
+        rank = min(rank + ups, nextBreak[rank] or to, to)
         step.to = rank
         cur = pick
     end

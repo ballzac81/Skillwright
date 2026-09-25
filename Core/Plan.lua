@@ -141,13 +141,16 @@ end
 function Plan.Options(prof, from)
     local db, cp = SW.DB(), SW.CharProf(prof)
     local s = SW.Settings()
-    -- Never plan past the rank cap: at 37/75 the route ends at 75 and the guide says to train the next
-    -- rank first. Planning to 300 there put steps like "skill 37 to 78" in front of the player.
-    local cap = SW.MAX_RANK
-    if cp.has and (cp.max or 0) > 0 then cap = math.min(cap, cp.max) end
+    -- Plan the whole profession. The route used to stop at the character's current cap, which read as
+    -- "this is where Blacksmithing ends" to someone at 81/150 - and the trainer visit that lifts the cap
+    -- is part of the road, not a footnote beside it (Plan.Boundaries puts it in the list).
+    -- A step must not run through a trainer visit: it would hide the visit inside a range.
+    local breaks = {}
+    for _, b in ipairs(Plan.Boundaries(prof)) do breaks[b.at] = true end
     return {
         from = math.max(1, from or cp.rank or 1),
-        to = cap,
+        to = SW.Ceiling(prof),
+        breaks = breaks,
         colors = db.colors,
         -- no real market data: the cheapest route should not be decided to the copper on invented prices
         pricesAreGuesses = SW.Prices.Status() == "none" or SW.Prices.Status() == "stale",
@@ -257,15 +260,15 @@ function Plan.Route(prof, mode)
         Plan.WantOther(prof, rank, mode)
         return r
     end
-    if r and rank >= r.to and not r.gapAt and r.to >= SW.MAX_RANK then return r end
+    if r and rank >= r.to and not r.gapAt and r.to >= SW.Ceiling(prof) then return r end
     -- The last stretch is short enough to work out on the spot, so the guide stays instant where it is
     -- used most. A longer route takes tens of milliseconds - a visible stutter - so that one is solved in
     -- the background, a few milliseconds per frame, while the guide says it is working.
-    if SW.MAX_RANK - rank <= SYNC_SPAN then return Plan.RouteNow(prof, mode) end
+    if SW.Ceiling(prof) - rank <= SYNC_SPAN then return Plan.RouteNow(prof, mode) end
     StartJob(prof, rank, mode)
     -- rather than blanking the page for the few frames the new plan takes
     local previous = Stale(prof, mode)
-    if previous and rank >= previous.from and (rank < previous.to or previous.to >= SW.MAX_RANK) then
+    if previous and rank >= previous.from and (rank < previous.to or previous.to >= SW.Ceiling(prof)) then
         return previous
     end
     return nil
@@ -787,11 +790,48 @@ function Plan.Remaining(prof)
     return crafts, cost, priced
 end
 
+--- Where the route has to stop for a trainer: each rank cap it crosses, with the rank that lifts it.
+--- The fifth entry has no name - Forever's rank above Artisan is in the client data as a skill line
+--- and four rank spells, but nothing there says what it is called or where it ends, so we say
+--- "the next rank" rather than invent one.
+function Plan.Boundaries(prof)
+    local out, ceiling = {}, SW.Ceiling(prof)
+    for i, t in ipairs(SW.TIERS) do
+        local nextTier = SW.TIERS[i + 1]
+        if t.cap < ceiling then
+            out[#out + 1] = { at = t.cap, name = nextTier and nextTier.name, need = nextTier and nextTier.need }
+        end
+    end
+    return out
+end
+
+--- The route as the Route tab reads it: the crafting steps with the trainer visits in their place.
+--- A cap the character has already lifted is not a step; it is history.
+function Plan.Rows(prof)
+    local route = Plan.Route(prof)
+    if not route then return nil end
+    local trained = SW.CharProf(prof).max or 0
+    local rows, bounds, bi = {}, Plan.Boundaries(prof), 1
+    local function trainRowsUpTo(rank)
+        while bounds[bi] and bounds[bi].at <= rank do
+            local b = bounds[bi]
+            if b.at >= trained and b.at >= route.from then rows[#rows + 1] = { train = b } end
+            bi = bi + 1
+        end
+    end
+    for _, s in ipairs(route.steps) do
+        trainRowsUpTo(s.from)
+        rows[#rows + 1] = { step = s }
+    end
+    trainRowsUpTo(route.to)
+    return rows, route
+end
+
 -- The next trainer tier to learn, when the rank is close to (or at) the current cap.
 function Plan.TrainingDue(prof)
     local cp = SW.CharProf(prof)
     local rank, max = cp.rank or 0, cp.max or 0
-    if max <= 0 or max >= SW.MAX_RANK then return nil end
+    if max <= 0 or max >= SW.Ceiling(prof) then return nil end
     for _, t in ipairs(SW.TIERS) do
         if t.cap > max then
             if rank >= t.need and rank >= max - 10 then return t end
