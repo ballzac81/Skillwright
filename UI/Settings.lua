@@ -113,6 +113,10 @@ function Page.Build(f)
         "Just the recipe to make, its materials and the Craft button. The - / + button by the close button "
         .. "switches too.", function() SW.SetMinimal(SW.Settings().minimal) end)
 
+    checkbox("Auction price on item tooltips", "tooltipPrice",
+        "One line on any item tooltip with what the auction house wants for it, and where that number "
+        .. "came from. Nothing is shown for items we have no price for.")
+
     -- Trainers
     heading("Trainers")
     checkbox("Read everything a trainer teaches", "deepTrainerScan",

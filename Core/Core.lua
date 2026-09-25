@@ -180,6 +180,7 @@ local DEFAULTS = {
         useOwned = true,         -- count materials already in the bags or bank as (nearly) free
         autoReplaceEnchant = false, -- accept "replace enchant?" for enchants Skillwright started
         deepTrainerScan = true,  -- read a trainer's hidden services once per visit (the list blinks once)
+        tooltipPrice = true,     -- one line on item tooltips: the auction price, and where it came from
     },
     learnRanks = {},             -- [recipeSpellID] = skill needed, read off trainers
     trainerSeen = {},            -- [recipeSpellID] = true when a trainer offers it
