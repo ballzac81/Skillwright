@@ -1239,6 +1239,7 @@ local function ApplyMode()
     local minimal = SW.Settings().minimal
     if minimal and not win.mini then BuildMini() end
     for _, w in ipairs(win.fullOnly) do w:SetShown(not minimal) end
+    if minimal then win.priceNote:Hide() end        -- shown again by UpdatePriceNote, if it has something to say
     if win.mini then win.mini:SetShown(minimal and true or false) end
     win.sizeBtn:SetText(minimal and "+" or "-")
     if not minimal then win:SetSize(W, H) end
@@ -1303,7 +1304,6 @@ end
 local function UpdatePriceNote()
     local note, status = win.priceNote, SW.Prices.Status()
     local text
-    local unpriced = win.prof and Plan.PricesUnknown(win.prof)
     if SW.dataLost then
         -- worth saying before anything about prices: it explains every empty number on the page
         text = "|cffffd100Your saved Skillwright data didn't load|r - prices, trainer skills and the recipe "
@@ -1326,17 +1326,21 @@ local function UpdatePriceNote()
         end
     end
     end
-    -- Nothing to do when it already says this: every refresh would otherwise re-measure and re-anchor.
-    if text == note.shownText then return end
+    -- Where the body starts is part of this decision, so it is made on every refresh, whoever else
+    -- may have touched the strip. Re-measuring the wrapped text is the expensive half, and only that
+    -- is skipped when the words have not changed.
+    local changed = text ~= note.shownText
     note.shownText = text
     win.body:ClearAllPoints()
     win.body:SetPoint("BOTTOMRIGHT", -12, 40)
     if text then
-        note.text:SetText(text)
-        note:SetHeight(math.ceil(note.text:GetStringHeight()) + 10)
+        if changed then
+            note.text:SetText(text)
+            note:SetHeight(math.ceil(note.text:GetStringHeight()) + 10)
+            -- wrapped height is only right once the strip has its width
+            C_Timer.After(0, function() note:SetHeight(math.ceil(note.text:GetStringHeight()) + 10) end)
+        end
         note:Show()
-        -- wrapped height is only right once the strip has its width
-        C_Timer.After(0, function() note:SetHeight(math.ceil(note.text:GetStringHeight()) + 10) end)
         win.body:SetPoint("TOPLEFT", note, "BOTTOMLEFT", 0, -6)
     else
         note:Hide()
@@ -1362,11 +1366,25 @@ local function Refresh()
     end
     win.mode:Select(SW.Settings().mode)
     -- Cheapest needs prices: without them both buttons plan the same shortest route, and saying so beats
-    -- letting the player think a choice is being made.
+    -- letting the player think a choice is being made. There are two kinds of "no prices", and they are
+    -- not the same offer: a scan fixes the first, and nothing fixes the second until somebody lists the
+    -- materials for sale.
+    local unpriced = win.prof and Plan.PricesUnknown(win.prof)
+    local scanWouldHelp = SW.Prices.Status() == "none" or SW.Prices.Status() == "stale"
     for _, b in ipairs(win.mode.buttons or {}) do
         if b.value == "cheap" then
-            b.fs:SetText(unpriced and "Scan to see" or "Cheapest")
-            b.needsScan = unpriced or nil
+            if not unpriced then
+                b.fs:SetText("Cheapest")
+                b.altTooltip = nil
+            elseif scanWouldHelp then
+                b.fs:SetText("Scan to see")
+                b.altTooltip = "No auction prices yet, so there is nothing to rank by gold. Scan at the "
+                    .. "auction house and this becomes a real choice."
+            else
+                b.fs:SetText("No prices")
+                b.altTooltip = "Some materials on this route are not sold by vendors and nobody had them "
+                    .. "listed at the last scan, so the gold cost of the route is not known."
+            end
         end
     end
     if unpriced then win.mode:Select(nil) end
@@ -1642,7 +1660,9 @@ local function Build()
     end)
     win.sizeBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     -- Everything the minimal window hides
-    win.fullOnly = { pb, win.mode, divider, win.body, win.scan, win.status, win.statusHit, win.priceNote }
+    -- Not win.priceNote: UpdatePriceNote decides when that is on screen, and two owners meant a
+    -- hidden strip coming back with stale text under the page's own content.
+    win.fullOnly = { pb, win.mode, divider, win.body, win.scan, win.status, win.statusHit }
     if HOSTED_SETTINGS then win.fullOnly[#win.fullOnly + 1] = win.gear end
     for _, b in ipairs(win.tabs.buttons) do win.fullOnly[#win.fullOnly + 1] = b end
 
@@ -1744,7 +1764,7 @@ end)
 -- DATA_LOST arrives a second or two after login: a guide opened before then has to be told, or it keeps
 -- looking like a fresh install until something else redraws it.
 for _, ev in ipairs({ "PLAN_CHANGED", "RANKS_CHANGED", "MERCHANT_CHANGED", "TRAINER_CHANGED", "SCAN_STATE", "RECIPES_CHANGED",
-                     "PROFESSION_UPDATED", "DATA_LOST" }) do
+                     "PROFESSION_UPDATED", "PRICES_CHANGED", "DATA_LOST" }) do
     SW.Listen(ev, SW.RefreshWindow)
 end
 SW.On("BAG_UPDATE_DELAYED", SW.RefreshWindow)

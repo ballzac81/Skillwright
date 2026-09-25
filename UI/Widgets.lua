@@ -92,8 +92,9 @@ function U.Segmented(parent, items, width, onSelect)
         if item.tooltip then
             b:SetScript("OnEnter", function(self)
                 GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-                GameTooltip:AddLine(item.label, 1, 0.82, 0.3)
-                GameTooltip:AddLine(item.tooltip, 0.85, 0.85, 0.85, true)
+                -- whatever the button says right now, and the reason it says it
+                GameTooltip:AddLine(self.fs:GetText() or item.label, 1, 0.82, 0.3)
+                GameTooltip:AddLine(self.altTooltip or item.tooltip, 0.85, 0.85, 0.85, true)
                 GameTooltip:Show()
             end)
             b:SetScript("OnLeave", function() GameTooltip:Hide() end)
