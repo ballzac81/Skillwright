@@ -50,12 +50,28 @@ SW.TIERS = {
 -- rank outright, is in none of the four builds we have.
 SW.MAX_RANK = 300
 
--- How far to plan. 300, unless a real character has stood higher than that: if Forever ever turns the
--- fifth rank on, a maxRank above 300 is the first place it will show, and we would rather follow the
--- game than our own table. A canary, not a source - see SW.CapSeen.
+-- How far the recipes themselves reach: the highest rank at which any of them can still give a point.
+-- Not a planning target - a grey rank above 300 only means a top recipe stays yellow all the way to the
+-- cap - but it is a real ceiling, because no plan can go past its last recipe whatever the game allows.
+local reach = {}
+function SW.DataReach(prof)
+    local known = reach[prof]
+    if known then return known end
+    local top, data = 0, SW.Data and SW.Data.professions and SW.Data.professions[prof]
+    for _, r in ipairs(data and data[2] or {}) do
+        if (r[6] or 0) > top then top = r[6] end        -- r[6] is the grey rank
+    end
+    reach[prof] = top > 0 and top or SW.MAX_RANK
+    return reach[prof]
+end
+
+-- How far to plan: 300, unless a real character has stood higher, and never past the last recipe.
+-- The floor is 300 because the data says so; the override is SW.CapSeen because if Forever ever turns
+-- the fifth rank on, a maxRank above 300 is the first place it will show, and we would rather follow the
+-- game than our own table. A canary, not a source.
 function SW.Ceiling(prof)
     local seen = SW.CapSeen(prof) or 0
-    return seen > SW.MAX_RANK and seen or SW.MAX_RANK
+    return math.min(SW.DataReach(prof), seen > SW.MAX_RANK and seen or SW.MAX_RANK)
 end
 
 -- The highest maxRank any character on this account has reached in a profession, recorded as we see it
