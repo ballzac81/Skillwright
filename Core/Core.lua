@@ -284,6 +284,8 @@ SlashCmdList.SKILLWRIGHT = function(input)
         SW.SetMode(cmd)
     elseif cmd == "prices" then
         SW.Prices.PrintStatus()
+    elseif cmd == "de" or cmd == "disenchant" then
+        SW.Disenchant.Print()
     elseif cmd == "debug" and strtrim(input or ""):lower():match("^debug%s+drift") then
         SW.Drift.Print(false)
     elseif cmd == "debug" then

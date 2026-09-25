@@ -91,6 +91,18 @@ function T.Run()
         end)
     end
 
+    Check(results, "disenchanting", function()
+        local DE = SW.Disenchant
+        DE.Have()
+        for _, id in ipairs({ 2589, 4246, 12640 }) do          -- cloth, a green belt, an epic
+            local group = DE.Group(id)
+            if group then
+                DE.Summary(group)
+                DE.Line(id)
+            end
+        end
+    end)
+
     Check(results, "names and money", function()
         SW.ItemName(2589)
         SW.MoneyShort(12345)

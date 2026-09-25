@@ -1,4 +1,5 @@
--- Skillwright - one line on an item tooltip: what the auction house wants for it.
+-- Skillwright - the lines Skillwright adds to an item tooltip: what the auction house wants for it,
+-- and - for an enchanter - what disenchanting items like it has actually given.
 -- Deliberately small. A price is the thing you want to know while the cursor is over an item; anything
 -- more belongs in the guide. Where the price comes from is part of the price: a number from Auctionator
 -- and a number from a scan you ran last Tuesday are not the same claim, and they do not look the same.
@@ -45,5 +46,8 @@ if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and
         if not id or isSecret(id) then return end
         local line = SW.TooltipPriceLine(id)
         if line then tt:AddLine(line) end
+        -- Only an enchanter ever sees this one, and only for an item that disenchants.
+        local de = SW.Disenchant and SW.Disenchant.Line(id)
+        if de then tt:AddLine(de) end
     end)
 end
