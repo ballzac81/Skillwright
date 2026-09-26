@@ -118,6 +118,8 @@ end
 
 function SW.SetMode(mode)
     if mode ~= "cheap" and mode ~= "fast" then return end
+    -- every caller of this is a person: the settings page, the buttons on the guide, /skw cheap|fast
+    SW.Settings().modeChosen = true
     if SW.Settings().mode == mode then return end
     SW.Settings().mode = mode
     -- both routes stay cached, so switching back and forth is instant and nothing is re-solved

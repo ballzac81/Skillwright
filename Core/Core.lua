@@ -239,6 +239,7 @@ local DEFAULTS = {
     ahScanned = 0,
     profNames = {},              -- [skillLineID] = localized name
     caps = {},                   -- [skillLineID] = the highest maxRank any character here has reached
+    migrations = {},             -- one-off fixes to saved data, by name, so each runs at most once
 }
 
 -- Defaults are filled in once per saved table (not on every call: this runs in sort comparators).
@@ -283,6 +284,32 @@ SW.Listen("LOGIN", function()
         SW.dataLost = true
         SW.Fire("DATA_LOST")
     end)
+end)
+
+-- Cheapest used to be the default, and until today it silently planned the shortest route whenever a
+-- single material had no price - which, without an auction scan, is always. So an account sitting on
+-- Cheapest with no prices has never seen a cheapest route: the button said one thing and did another.
+-- Those accounts move to Fastest, which is what they were getting anyway; the only thing that changes
+-- is that the label stops lying. Anyone who has scanned, or who picked a mode themselves, is left
+-- alone - a default is ours to change, a choice is not.
+-- Runs at most once (SkillwrightDB.migrations), and does nothing at all on a second pass.
+local function MigrateDefaultMode()
+    local db = SW.DB()
+    if db.migrations.modeToFast then return false end
+    db.migrations.modeToFast = true
+    local s = SW.Settings()
+    local hasPrices = (db.ahScanned or 0) > 0 or (Auctionator and Auctionator.API) or TSM_API
+    if s.mode ~= "cheap" or s.modeChosen or hasPrices then return false end
+    s.mode = "fast"
+    return true
+end
+
+SW.Listen("LOGIN", function()
+    if MigrateDefaultMode() then
+        SW.msg("|cffffd100Cheapest needs auction prices|r, and without them it was only ever showing the "
+            .. "shortest route. You are on |cffffd100Fastest|r now, which is the same plan under its own "
+            .. "name. Scan at the auction house and Cheapest becomes a real choice - /skw cheap.")
+    end
 end)
 
 -- Per character: profession ranks, learned recipes and the chosen specialization.
