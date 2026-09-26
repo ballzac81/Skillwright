@@ -11,9 +11,30 @@ local F_SPELL, F_ITEM, F_QTY, F_LEARN, F_YELLOW, F_GREY, F_UPS, F_SRC, F_STATION
 
 -- Trainers don't publish the skill a recipe needs to learn; this estimate is replaced by the real value as
 -- soon as the player opens a trainer (SkillwrightDB.learnRanks). Conservative on purpose: planning a recipe
--- slightly late costs little, planning it before it can be learned breaks the route.
+-- slightly late costs little, planning it before it can be learned puts a step in the route that cannot
+-- be done at all.
+--
+-- The gap is measured, and the measurement is worth keeping because the obvious calibration is wrong.
+--
+-- Of the 2163 recipes we ship, the 1621 that carry a real learn rank are ALL recipe items ("r"). Not one
+-- trainer recipe has one - 394 of 394 are blank, which is why the estimate exists at all. So calibrating
+-- against "every recipe whose requirement we know" measures drop and vendor recipes and applies the
+-- answer to trainer recipes: a different population, and usable() only plans an "r" once the player
+-- already knows it, where this estimate is never consulted.
+--
+-- Against 45 REAL trainer observations (learn ranks this account has read off trainers), yellow sits
+-- this far above the true learn rank: nine at +0, two at +5, then a long cluster at +30 and +40, max +55.
+--     yellow - 10   too early for 11 of 45, never by more than 10 points; too late by 30 (median)
+--     yellow - 5    too early for  9 of 45, never by more than  5 points; too late by 30
+--     yellow        too early for  0 of 45;                               too late by 30, up to 55
+-- Being late is not free: a trainer recipe is learned while it is still orange and stays orange for
+-- another 30-40 points, so estimating `yellow` holds a recipe back for that whole band and the route
+-- grinds a nearly-grey one instead. Measured on a real scan, moving to `yellow` turned a 159-craft
+-- route into a 254-craft one, including 44 crafts of a recipe four points from grey.
+-- Ten points early, self-corrected the moment they open a trainer, beats thirty points late.
 local LEARN_GAP = 10
-local LEARN_GAP_FALLBACK = 30    -- used only where the conservative estimate leaves no recipe at all
+local LEARN_GAP_FALLBACK = 30    -- the escape hatch: only where the safe estimate leaves no recipe at all,
+                                 -- and always flagged to the player as an estimate
 local YIELD_EVERY = 20        -- ranks between breaks when solving in the background
 local SWITCH_PENALTY = 3         -- switching recipe costs as much as ~3 skill points (fewer, longer steps)
 local FAST_GOLD_WEIGHT = 1 / (20 * 10000) -- fast mode: 20g of mats counts as one extra craft (tie-breaker)
@@ -408,10 +429,30 @@ function Solver.Solve(prof, opts)
         end
         cands = kept
     end
-    -- Can we price the field at all? Without an auction scan most materials have no price we know, and
-    -- "cheapest" would be a ranking of guesses. Then the honest plan is the one with the fewest crafts.
+    -- Can we price THIS stretch? Only recipes that could be used before `to` matter: an endgame
+    -- reagent nobody can price says nothing about a route that ends at 150, and asking about the whole
+    -- profession is what used to turn Cheapest off for everyone.
+    -- priceHorizon is the first rank where that stops being true - the lowest rank at which a recipe we
+    -- cannot price could be reached. Below it, "cheapest" compares real prices; above it, it would be
+    -- comparing against a hole.
+    local priceHorizon
     for _, c in ipairs(cands) do
-        if (c.unpriced or 0) > 0 then pricesUnknown = true break end
+        if (c.unpriced or 0) > 0 and c.first < to then
+            pricesUnknown = true
+            if not priceHorizon or c.first < priceHorizon then priceHorizon = c.first end
+        end
+    end
+    -- Cheapest as far as the prices reach, then fewest crafts: two objectives that cannot share one
+    -- table (copper and crafts do not add up), so they are two solves joined at the horizon. The break
+    -- machinery already keeps a step from running through that rank.
+    if opts.mode == "cheap" and not opts.oneObjective and priceHorizon
+       and priceHorizon > from and priceHorizon < to then
+        local under = { to = priceHorizon, oneObjective = true }
+        local over = { from = priceHorizon, mode = "fast", oneObjective = true }
+        local a = Solver.Solve(prof, setmetatable(under, { __index = opts }))
+        local b = Solver.Solve(prof, setmetatable(over, { __index = opts }))
+        if a and b then return Solver.Join(a, b, priceHorizon) end
+        return a or b
     end
     if pricesUnknown then fast = true end
 
@@ -452,6 +493,10 @@ function Solver.Solve(prof, opts)
             local gold = c.weight and c.weight * FAST_GOLD_WEIGHT or 0
             return (1 + extra + gold) / p
         end
+        -- Ranking by gold, and this one has no gold figure: it can never be the cheapest answer, because
+        -- we do not know what it costs. Not a guess at its price - a refusal to rank it against real ones.
+        -- The range is chosen so this cannot normally happen (see priceHorizon); this is the floor under it.
+        if not c.weight then return huge end
         return c.weight / p
     end
 
@@ -598,5 +643,27 @@ function Solver.Solve(prof, opts)
     end
     -- `cost` covers only what we could price; pricesUnknown says the rest exists and was not invented
     return { steps = steps, crafts = total, cost = costKnown and cost or nil, knownCost = cost,
-             pricesUnknown = pricesUnknown or not costKnown, from = from, to = to, mode = opts.mode }
+             pricesUnknown = pricesUnknown or not costKnown, from = from, to = to, mode = opts.mode,
+             -- how far this plan could be costed at all, for the page to say out loud
+             pricedTo = (not fast and not pricesUnknown) and to or nil }
+end
+
+--- Two halves of one route: cheapest as far as the prices reach, fewest crafts after that.
+--- Everything the page reads has to survive the join, and the gold total may only cover the half we
+--- could actually price - saying that is the whole point of splitting rather than quietly picking one.
+function Solver.Join(a, b, horizon)
+    local steps = {}
+    for _, s in ipairs(a.steps) do steps[#steps + 1] = s end
+    for _, s in ipairs(b.steps) do steps[#steps + 1] = s end
+    return {
+        steps = steps,
+        crafts = a.crafts + b.crafts,
+        cost = nil,                                  -- only half of it is known; knownCost carries that
+        knownCost = (a.knownCost or 0) + (b.knownCost or 0),
+        pricesUnknown = true,
+        from = a.from, to = b.to, mode = "cheap",
+        pricedTo = horizon,
+        gapAt = a.gapAt or b.gapAt,
+        gapOptions = a.gapOptions or b.gapOptions,
+    }
 end

@@ -341,6 +341,46 @@ end
 
 -- Is the route we are showing planned without prices? True when any material has no vendor price and
 -- no auction price, which is most of them until the player scans.
+--- Why a step that is not a guaranteed skill-up can still be the right one: what the surest
+--- alternative would cost for the same skill points. This is the comparison the solver already made,
+--- read back out - not a new one. Returns the alternative and the extra gold it would take, and
+--- nothing at all when the step IS the sure thing, when no priced sure thing exists, or when the sure
+--- thing is not actually dearer (then there is nothing to explain).
+function Plan.YellowTradeOff(cur)
+    if not (cur and cur.step and cur.orange) then return nil end
+    local rank = cur.rank or 0
+    local mine = SW.Solver.Chance(cur.step.yellow, cur.step.grey, rank)
+    if not mine or mine >= 1 then return nil end        -- the step is orange: nothing to explain
+    local mineCost = (Plan.StepCost(cur.step) or 0) * (cur.left or 1)
+    if mineCost <= 0 then return nil end
+    local best
+    for _, o in ipairs(cur.orange) do
+        if o.guaranteed and o.spell ~= cur.step.spell and o.total and o.total > 0 then
+            if not best or o.total < best.total then best = o end
+        end
+    end
+    if not best or best.total <= mineCost then return nil end
+    return best, best.total - mineCost
+end
+
+--- What a vendor pays for what this step makes, for the whole step. Half the reason a step with dear
+--- materials can still be the cheapest one: 318 bronze bars looks ruinous until you see that the
+--- leggings sell back for most of it. The solver already counts this; the page did not say it.
+function Plan.Resale(step, crafts)
+    if not (step and step.item and step.item > 0) then return nil end
+    local facts = SW.Data.items and SW.Data.items[step.item]
+    local sell = facts and facts[2] or 0
+    if sell <= 0 then return nil end
+    return sell * (step.qty or 1) * (crafts or 1)
+end
+
+--- How far the cheapest route could be costed: nil when nothing could be, the route's own end when
+--- everything could. Between the two, the plan is cheapest up to here and shortest after.
+function Plan.PricedTo(prof)
+    local route = Plan.Route(prof)
+    return route and route.pricedTo or nil
+end
+
 function Plan.PricesUnknown(prof)
     local r = Plan.RouteIfReady(prof)
     return r ~= nil and r.pricesUnknown == true

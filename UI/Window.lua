@@ -146,6 +146,7 @@ local function BuildNow(f)
 
     c.learn = U.Text(c, "GameFontHighlightSmall", "LEFT", true)
     c.why = U.Text(c, "GameFontHighlightSmall", "LEFT", true)   -- why this card differs from the route
+    c.tradeoff = U.Text(c, "GameFontHighlightSmall", "LEFT", true)  -- what the sure alternative would cost
     -- Recipes that are the same for the plan (Rough Sharpening Stone / Rough Weightstone): the player picks
     c.alts = CreateFrame("Button", nil, c)
     c.alts:SetHeight(16)
@@ -422,7 +423,7 @@ local function RefreshNow(f)
 
     local cp = SW.CharProf(prof)
     local have = cp.has
-    for _, w in ipairs({ c.learn, c.why, c.alts, c.learnBox, c.trade, c.warn, c.matsHead, c.info, c.craftBtn, c.buyBtn, c.trainBtn, c.nextHead, c.gapHead, c.gapText, c.total,
+    for _, w in ipairs({ c.learn, c.why, c.tradeoff, c.alts, c.learnBox, c.trade, c.warn, c.matsHead, c.info, c.craftBtn, c.buyBtn, c.trainBtn, c.nextHead, c.gapHead, c.gapText, c.total,
                          c.targetLabel, c.targetSlot, c.targetText, c.autoCB }) do
         w:Hide()
         if w.line then w.line:Hide() end
@@ -648,6 +649,16 @@ local function RefreshNow(f)
             place(c.why, 4, 6)
         end
 
+        -- A step that is not a sure skill-up looks like a bad step until you see what the sure one
+        -- costs. Same skill points, both numbers already worked out - only the sentence was missing.
+        local sure, extra = Plan.YellowTradeOff(cur)
+        if sure and extra then
+            c.tradeoff:SetText(("|cff8a8a8aNot a sure skill-up, on purpose:|r |cffffd100%s|r |cff8a8a8ais, "
+                .. "and would cost about|r |cffffd100%s|r |cff8a8a8amore for the same skill.|r")
+                :format(U.RecipeName(sure.spell), SW.MoneyShort(extra)))
+            place(c.tradeoff, 4, 6)
+        end
+
         -- Several recipes are guaranteed skill-ups right now: name the runner-up and let them choose
         local orange = cur.orange
         if orange and #orange > 1 then
@@ -749,6 +760,9 @@ local function RefreshNow(f)
         else
             -- The honest number is what is still missing; the full cost of the step is the second half,
             -- because materials already in the bags are not spent again.
+            -- What comes back when the products are sold: the solver counts it, so the page has to
+            -- say it, or a step of dear materials looks like a mistake.
+            local back = Plan.Resale(s, cur.left)
             local unpricedNote = " |cff8a8a8a(only the materials we have a price for)|r"
             if not cur.enough and (cur.missingCost or 0) > 0 then
                 info[#info + 1] = ("Still to buy: %s%s."):format(Cost(cur.missingCost, partial),
@@ -756,6 +770,10 @@ local function RefreshNow(f)
             else
                 info[#info + 1] = ("This step costs %s%s."):format(
                     Cost(Plan.StepCost(s) * cur.left, partial), partial and unpricedNote or "")
+            end
+            if back and back > 0 then
+                info[#info + 1] = ("|cff8a8a8aSelling what you make back to a vendor returns about %s of that.|r")
+                    :format(SW.MoneyShort(back))
             end
             -- Only say "from a vendor" when we actually know a vendor price for every material: a guess
             -- from an item's sell price is not a vendor, and saying so sends people shopping for ore.
@@ -1024,6 +1042,10 @@ local function RefreshRoute(f)
         and ("Planned to |cffffd100%d|r: a character here has reached that, past the 300 the game data stops at.")
             :format(ceiling)
         or "Planned to |cffffd100300|r, the highest skill any recipe in this build needs."
+    if route.pricedTo and route.pricedTo > route.from and route.pricedTo < route.to then
+        notes[#notes + 1] = ("Planned on price up to |cffffd100%d|r. Nothing above that has a price, so "
+            .. "from there it is the shortest route."):format(route.pricedTo)
+    end
     if route.gapAt then
         notes[#notes + 1] = ("The route ends at |cffffd100%d|r: no trainer recipe gives skill past that. See Now for recipes that would."):format(route.gapAt)
     end
@@ -1355,6 +1377,15 @@ local function UpdatePriceNote()
         text = "|cffffd100Your saved Skillwright data didn't load|r - prices, trainer skills and the recipe "
             .. "you were following all start empty this session. That is a WoW: Forever bug, not something "
             .. "you did. Skillwright learns it again as you play."
+    end
+    -- Cheapest as far as the prices reach: the one case where the strip is not about missing prices
+    -- but about where the plan changes its mind.
+    local route = win.prof and Plan.RouteIfReady(win.prof)
+    local pricedTo = route and route.pricedTo
+    if not text and SW.Settings().mode == "cheap" and route and pricedTo
+       and pricedTo > route.from and pricedTo < route.to then
+        text = ("|cffffd100Cheapest to %d.|r Above that nothing on the route has a price, so the rest of "
+            .. "it is the |cffffd100shortest|r one - fewest crafts, whatever they cost."):format(pricedTo)
     end
     if not text then
     if win.view ~= "settings" and (status == "none" or status == "stale") then
