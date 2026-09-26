@@ -214,7 +214,10 @@ end
 -- Account-wide: settings plus facts learned from the game, shared by every character.
 local DEFAULTS = {
     settings = {
-        mode = "cheap",          -- "cheap" or "fast"
+        -- Fastest is the guide: the same route for everyone, from the recipe data alone, with no
+        -- price anywhere in it. Cheapest is the extra that needs an auction scan. Only new
+        -- installs land here - a mode already saved is a choice we do not overrule.
+        mode = "fast",           -- "cheap" or "fast"
         attach = true,           -- open beside the profession window
         autoOpen = true,         -- open with the profession window
         minimal = false,         -- small window: step, materials, Craft
@@ -224,6 +227,9 @@ local DEFAULTS = {
         autoReplaceEnchant = false, -- accept "replace enchant?" for enchants Skillwright started
         deepTrainerScan = true,  -- read a trainer's hidden services once per visit (the list blinks once)
         tooltipPrice = true,     -- one line on item tooltips: the auction price, and where it came from
+        -- Fastest: how much longer the player will take for lighter materials. 0 is purely the fewest
+        -- crafts; 0.25 gives something close to the published guides. Not a price - a tolerance.
+        craftTolerance = 0.10,
     },
     learnRanks = {},             -- [recipeSpellID] = skill needed, read off trainers
     trainerSeen = {},            -- [recipeSpellID] = true when a trainer offers it

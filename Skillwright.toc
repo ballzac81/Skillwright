@@ -30,6 +30,7 @@ Core\Core.lua
 Data\Recipes.lua
 Data\Items.lua
 Data\Disenchant.lua
+Data\Smelting.lua
 Data\TrainerHints.lua
 Core\Solver.lua
 Core\Professions.lua

@@ -37,11 +37,16 @@ local LEARN_GAP_FALLBACK = 30    -- the escape hatch: only where the safe estima
                                  -- and always flagged to the player as an estimate
 local YIELD_EVERY = 20        -- ranks between breaks when solving in the background
 local SWITCH_PENALTY = 3         -- switching recipe costs as much as ~3 skill points (fewer, longer steps)
-local FAST_GOLD_WEIGHT = 1 / (20 * 10000) -- fast mode: 20g of mats counts as one extra craft (tie-breaker)
+-- Fastest never looks at a price. Where it used to add "20g of materials counts as one extra craft",
+-- it now trades crafts for material WEIGHT (Solver.StaticWeight, vendor sell value of the raw materials)
+-- and only within a tolerance the player sets: fewest crafts decides, and among routes within that much
+-- of the fewest, the lightest one wins. A tolerance has no exchange rate to invent and cannot run away.
+-- The ladder is the set of trade rates tried; the one that buys the most lightness inside the tolerance
+-- is the route we keep. Geometric, because what matters is the order of magnitude, not the exact rate.
+local FAST_WEIGHT_LADDER = { 0, 1 / 8000, 1 / 2000, 1 / 500, 1 / 125 }
 -- "Prefer vendor materials": materials you have to farm or buy at auction count this many times their price,
 -- and in fast mode each craft that needs them counts as this many extra crafts.
 local VENDOR_BIAS = 2.5
-local FAST_VENDOR_PENALTY = 0.75
 -- A material with no vendor price and no auction price has no price here either: nothing is guessed from
 -- its sell price. A route that needs one cannot be costed, so "cheapest" has nothing to compare and the
 -- guide shows the shortest route instead until the player scans.
@@ -180,6 +185,65 @@ local function craftCost(r, price, preferVendor)
     end
     if unpriced > 0 then return nil, vendorOnly, nil, haveAll, unpriced end
     return sum, vendorOnly, weighted, haveAll, 0
+end
+
+---------------------------------------------------------------------------- how heavy the materials are
+
+-- What a recipe's materials weigh, with no prices involved at all: the vendor sell value of the raw
+-- materials, after resolving anything Mining smelts back to the ore it came from. Static, the same on
+-- every server, straight out of the client data - which is what the Fastest guide needs, because a
+-- guide that changes with the auction house is not a guide.
+--
+-- Two other measures were tried first and both rank wrongly, so do not bring them back:
+--   * chain depth (ore is 0, a bar is 1, bronze is 2). Says a copper belt beats bronze leggings. Wrong:
+--     Smelt Bronze makes TWO bars, so a bronze bar costs half a copper ore plus half a tin ore.
+--   * raw unit count after expansion. Says the same bronze bar and copper bar are equal - one ore each -
+--     so 6 bronze (6 ore) beats 12 copper (12 ore). Also wrong: tin is not copper. Tin ore sells for 25c
+--     against copper's 5c and is mined a whole tier later.
+-- Sell value gets it right because the game already ranks materials that way: 6 bronze bars expand to
+-- 3 copper + 3 tin ore = 90c, against 12 copper bars = 60c. Bronze is half again dearer, not half price.
+local weightCache = {}
+local function rawValue(id, depth)
+    local cached = weightCache[id]
+    if cached then return cached end
+    local made = SW.Data.smelting and SW.Data.smelting[id]
+    local value
+    if made and (depth or 0) < 6 then
+        local qty, mats = made[1], made[2]
+        local sum = 0
+        for i = 1, #mats, 2 do
+            sum = sum + mats[i + 1] * rawValue(mats[i], (depth or 0) + 1)
+        end
+        value = sum / max(1, qty)
+    else
+        local facts = itemFacts(id)
+        value = (facts and facts[2] or 0)
+    end
+    weightCache[id] = value
+    return value
+end
+
+--- Does a vendor stock every material? Static: the datamined vendor price, not an auction or a scan.
+--- Only 35 of the 513 materials recipes use have one, so this separates few recipes - but when it does,
+--- "walk to a shop" really is easier than "go and mine it", and that is worth a nudge.
+function Solver.AllFromVendor(r)
+    local mats = r[F_MATS]
+    if #mats == 0 then return false end
+    for i = 1, #mats, 2 do
+        local facts = itemFacts(mats[i])
+        if not (facts and (facts[1] or 0) > 0) then return false end
+    end
+    return true
+end
+
+--- The static weight of one craft, plus how many different materials it needs.
+function Solver.StaticWeight(r)
+    local mats, sum, kinds = r[F_MATS], 0, 0
+    for i = 1, #mats, 2 do
+        sum = sum + mats[i + 1] * rawValue(mats[i], 0)
+        kinds = kinds + 1
+    end
+    return sum, kinds
 end
 
 ---------------------------------------------------------------------------------------------------- tools
@@ -369,8 +433,9 @@ function Solver.Solve(prof, opts)
             local grey = (seen and seen.grey) or r[F_GREY]
             -- only guard numbers we learned in game: the datamined pairs may legitimately be equal
             if seen and grey <= yellow then grey = yellow + 1 end
+            local staticWeight, kinds = Solver.StaticWeight(r)
             local c = { r = r, cost = cost, vendorOnly = vendorOnly, weight = weighted, haveMats = haveAll,
-                        unpriced = unpriced,
+                        unpriced = unpriced, staticWeight = staticWeight, kinds = kinds,
                         learn = learn, learnFB = learnFB, first = learn < learnFB and learn or learnFB,
                         yellow = yellow, grey = grey, ups = max(1, r[F_UPS]) }
             cands[#cands + 1] = c
@@ -392,8 +457,8 @@ function Solver.Solve(prof, opts)
             local tools = r[F_TOOLS]
             local key = ("%d:%d:%d:%d:%d:%s:%s"):format(c.learn, c.learnFB, c.yellow, c.grey, c.ups,
                 tools and #tools > 0 and table.concat(tools, ",") or "-", r[F_STATION])
-            c.score = fast and (1 + ((preferVendor and not c.vendorOnly) and FAST_VENDOR_PENALTY or 0)
-                + (c.weight and c.weight * FAST_GOLD_WEIGHT or 0)) or (c.weight or math.huge)
+            c.score = fast and (c.staticWeight + c.kinds * 0.01 + (Solver.AllFromVendor(r) and 0 or 0.001))
+                or (c.weight or math.huge)
             local g = groups[key]
             if not g then
                 g = { members = {} }
@@ -456,6 +521,29 @@ function Solver.Solve(prof, opts)
     end
     if pricesUnknown then fast = true end
 
+    -- Fastest with a tolerance: solve for fewest crafts, then see how much lighter the materials can
+    -- get without going more than `tolerance` over that. The ladder is tried from the boldest trade
+    -- down, so the first route inside the tolerance is the lightest one we can have.
+    if fast and not opts.noTolerance and (opts.tolerance or 0) > 0 then
+        local base = Solver.Solve(prof, setmetatable({ noTolerance = true, weightPer = 0 },
+            { __index = opts }))
+        if not base then return nil end
+        local allowed = base.crafts * (1 + opts.tolerance)
+        for i = #FAST_WEIGHT_LADDER, 1, -1 do
+            local rate = FAST_WEIGHT_LADDER[i]
+            if rate > 0 then
+                local try = Solver.Solve(prof, setmetatable({ noTolerance = true, weightPer = rate },
+                    { __index = opts }))
+                if try and try.crafts <= allowed and (try.weight or 0) < (base.weight or 0) then
+                    try.tradedCrafts = try.crafts - base.crafts
+                    return try
+                end
+            end
+        end
+        return base
+    end
+
+
     -- lowest skill needed first, so the loop can stop where the rest are still out of reach
     table.sort(cands, function(a, b)
         if a.first ~= b.first then return a.first < b.first end
@@ -489,9 +577,9 @@ function Solver.Solve(prof, opts)
         if p <= 0 then return nil end
         if not toolsOK(r, rank) then return nil end
         if fast then
-            local extra = (preferVendor and not c.vendorOnly) and FAST_VENDOR_PENALTY or 0
-            local gold = c.weight and c.weight * FAST_GOLD_WEIGHT or 0
-            return (1 + extra + gold) / p
+            -- one craft, plus whatever weight the caller is willing to trade crafts for
+            local heavy = (opts.weightPer or 0) * (c.staticWeight or 0)
+            return (1 + heavy) / p
         end
         -- Ranking by gold, and this one has no gold figure: it can never be the cheapest answer, because
         -- we do not know what it costs. Not a guess at its price - a refusal to rank it against real ones.
@@ -642,7 +730,12 @@ function Solver.Solve(prof, opts)
         for _, t in ipairs(s.prereqs) do cost = cost + (t.cost or 0) end
     end
     -- `cost` covers only what we could price; pricesUnknown says the rest exists and was not invented
-    return { steps = steps, crafts = total, cost = costKnown and cost or nil, knownCost = cost,
+    local staticWeight = 0
+    for _, s in ipairs(steps) do
+        staticWeight = staticWeight + s.crafts * (Solver.StaticWeight(bySpell[s.spell].r))
+    end
+    return { steps = steps, crafts = total, weight = staticWeight,
+             cost = costKnown and cost or nil, knownCost = cost,
              pricesUnknown = pricesUnknown or not costKnown, from = from, to = to, mode = opts.mode,
              -- how far this plan could be costed at all, for the page to say out loud
              pricedTo = (not fast and not pricesUnknown) and to or nil }

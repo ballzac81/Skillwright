@@ -155,6 +155,8 @@ function Plan.Options(prof, from)
         -- no real market data: the cheapest route should not be decided to the copper on invented prices
         pricesAreGuesses = SW.Prices.Status() == "none" or SW.Prices.Status() == "stale",
         mode = s.mode,
+        -- only Fastest trades crafts for lighter materials; Cheapest has real prices and uses them
+        tolerance = s.craftTolerance or 0,
         known = cp.known,
         learnRanks = db.learnRanks,
         vendorPrices = db.vendor,
