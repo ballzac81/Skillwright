@@ -1023,8 +1023,9 @@ local function RefreshRoute(f)
             local partial = false
             for _, m in ipairs(s.mats) do if NoPrice(m.priceSource) then partial = true end end
             local known = SW.Prof.Knows(prof, s.spell)
-            r.text:SetText((known and "" or "|cffff8040*|r ") .. U.RecipeName(s.spell) .. " " .. SourceTag(s.source)
-                .. MatsTag(s))
+            local guessed = not known and s.learnEstimated
+            r.text:SetText((known and "" or (guessed and "|cffff8040*?|r " or "|cffff8040*|r "))
+                .. U.RecipeName(s.spell) .. " " .. SourceTag(s.source) .. MatsTag(s))
             local crafts = current and Plan.CraftsLeft(s, rank) or s.crafts
             r.right:SetText(("x%d  %s"):format(crafts, Cost(crafts * Plan.StepCost(s), partial)))
             r.tipItem, r.tipSpell, r.tipExtra = s.item, s.spell, StepTooltip(s)
@@ -1036,6 +1037,14 @@ local function RefreshRoute(f)
         end
     end
     local notes = { "|cffff8040*|r not learned yet.  |cff8a8a8aat least|r = some materials have no known price." }
+    -- Only say it when a step on the page actually rests on a guess.
+    for _, s in ipairs(route.steps) do
+        if s.learnEstimated and not SW.Prof.Knows(prof, s.spell) and s.to > rank then
+            notes[#notes + 1] = "|cffff8040*?|r the skill it needs is our estimate: the game data does not "
+                .. "carry it for trainer recipes. Open the trainer once and Skillwright uses the real number."
+            break
+        end
+    end
     -- Where the plan ends, and why that number and not another one.
     local ceiling = SW.Ceiling(prof)
     notes[#notes + 1] = ceiling > SW.MAX_RANK
