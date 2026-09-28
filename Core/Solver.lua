@@ -120,6 +120,8 @@ local HAVE_DISCOUNT = 0.1
 
 SW.Solver = SW.Solver or {}
 local Solver = SW.Solver
+-- Read by the UI: a menu that offers what the planner would refuse is the guide arguing with itself.
+Solver.CHANCE_FLOOR = CHANCE_FLOOR
 
 local function itemFacts(id)
     return SW.Data.items and SW.Data.items[id]
@@ -552,7 +554,11 @@ function Solver.Solve(prof, opts)
                 best.alts = {}
                 for _, c in ipairs(g.members) do
                     if c ~= best then
-                        best.alts[#best.alts + 1] = { spell = c.r[F_SPELL], item = c.r[F_ITEM], cost = c.cost }
+                        -- yellow/grey travel with it: whoever offers this to the player has to be
+                        -- able to ask whether it is grey for them, and the group's own thresholds
+                        -- are not the answer when the player is above them.
+                        best.alts[#best.alts + 1] = { spell = c.r[F_SPELL], item = c.r[F_ITEM],
+                                                      cost = c.cost, yellow = c.yellow, grey = c.grey }
                     end
                 end
                 -- a cost we do not know sorts last rather than throwing

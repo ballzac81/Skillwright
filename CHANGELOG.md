@@ -76,6 +76,80 @@
   group is exact client data, what comes out of a group is not, so Skillwright counts your own results
   and says how many it has seen. No Enchanting means no line at all.
 
+### The window
+
+- **Clicking Mining or Fishing no longer throws the guide across the screen.** It let go of the
+  profession window and went back to wherever you had last dragged it, which from your side is
+  just the window jumping. It stays where it is now and says it has nothing to plan for that one.
+- **It wears the profession window's own panel art** - the drawing behind the page and the
+  inner frame with its lines and corner pieces - so the guide reads as part of that window
+  rather than a box parked beside it. The drawing is the one for the profession you are on and
+  changes with it, Mining and Fishing included. It is the client's own art, not a copy, so it
+  follows whatever Blizzard does to it.
+- **The tabs sit on the panel and the content sits inside it.** Now, Route and Shopping floated
+  above the panel with a gap under them, the words started on the frame line, and the
+  scrollbar's arrows sat on its top and bottom edges. There is room around everything now.
+- **Two parts of the window had no art at all, and nothing said so.** The selected mode button
+  and the rows on the Route tab were both marked with an atlas this client does not have, and a
+  missing atlas draws nothing rather than complaining - which is also why the first attempt at
+  the panel art was invisible. Both are drawn now, and every atlas the window asks for is
+  checked before it is used.
+- **Each profession is compared against the client once, not once per window.** Opening
+  Blacksmithing, then Cooking, then Blacksmithing again read all two thousand recipe schematics
+  three times over, and so did closing and reopening the window. The repeats never found
+  anything - the log line said "grey differs 0, skill-ups differ 0, reagents differ 0" every
+  time. It runs again for a profession when you learn a recipe in it, which is the one thing
+  that can change the answer.
+
+- **"Make instead" is a choice again, not a wall.** It listed every recipe that could give a
+  point - two dozen at Blacksmithing 97 - so the eight worth reading were buried. It shows the
+  best eight now, sorted as before by what you would still have to buy, with **Show all** at the
+  bottom for the rest. A recipe you have picked yourself is always in the short list.
+- **It no longer offers what cannot help you.** A grey recipe gives nothing, ever, so it is never
+  listed. Nor is one whose chance is below the line the planner itself refuses to plan with -
+  unless you can make it right now from what is in your bags, which is a different offer and says
+  so. On the route in the screenshot that started this, nothing was actually grey; what it removes
+  is the near-grey tail once your bags are empty.
+- **The card says whose choice the recipe is.** A recipe you picked yourself was marked
+  "(your choice)" - at the end of the sentence naming a *different* recipe, the one under
+  "Make instead". So a chosen step of 158 crafts sat above a line offering 31, with the green
+  marker apparently on the 31, and Fastest looked like it was recommending the long way round.
+  The marker is on the headline now, next to the recipe it is about. If the guide substituted
+  the recipe itself because you cannot make the route's one, it says that instead - that is not
+  your choice and no longer claims to be. **Let Skillwright choose** in the same menu hands the
+  step back to the route.
+- **Cheapest and Fastest show which one you are on.** The selected mode was marked by a texture
+  that does not exist in this client and a font one shade apart from the other - and then cleared
+  outright whenever anything on the route had no price, so neither was marked at all. The one you
+  are using is now filled and white; the other is grey.
+
+- **Skillwright has a tab on the profession window.** It sits under your profession tabs, in the
+  same column, and it is built from the same template the client builds those tabs from rather
+  than drawn to look like one - so it matches whatever that art is, and moves down by itself when
+  you pick up another profession. It is lit while the guide is open, and clicking it opens or
+  closes the guide. It stays in the column on Mining and Fishing too, where pressing it opens the
+  guide on a profession it can actually plan.
+- **Whether you want the guide is remembered.** Two things say you do not: the X on the guide,
+  and its tab. Either one keeps it shut - through profession switches, through closing and
+  reopening the window, and through a reload - until you press the tab again. Nothing else
+  counts: closing the *profession* window takes the guide with it and the next one brings it
+  back, because that is the window going away rather than a decision about the guide.
+- **Escape no longer loses the guide for good.** Pressing it over the profession window closed
+  both, and the guide then stayed away until you found the tab - the addon had no way to tell
+  that hide apart from you closing it, and guessed wrong. It no longer guesses.
+- **It no longer appears on its own after Escape either.** Closing the profession window used to
+  leave a guide you had opened yourself on screen, detached and moved to its free-floating
+  position - it had not reopened, it had jumped, but there is no way to tell those apart by
+  looking. None of this touches "Open with the profession window" in Settings, which is still
+  the setting for "never do this on your own".
+- **It keeps out of other addons' way.** If another addon has already put a panel on the right of
+  the profession window, the guide takes the left instead; if both sides are taken, it stops
+  attaching and stays where you last put it rather than landing on someone else's panel. The button
+  does the same, stepping left along the title bar until it finds room. What counts as being in the
+  way is something anchored to the profession window - which is what an addon that adds to that
+  window does. A window that merely happens to be on screen is left alone, and a panel that appears
+  after the guide has anchored can still overlap until the next time it anchors.
+
 ### Fixes
 
 - **Opening Mining, Herbalism or Fishing now gets the guide out of the way.** It used to sit there

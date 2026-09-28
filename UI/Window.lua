@@ -176,7 +176,10 @@ local function BuildNow(f)
     c.altsChev = U.Text(c.alts, "GameFontNormalSmall", "RIGHT", false)
     c.altsChev:SetPoint("TOPRIGHT", -7, -4)
     c.altsChev:SetText("|cffffd100v|r")
-    c.alts:SetScript("OnClick", function(self) AltMenu(self) end)
+    c.alts:SetScript("OnClick", function(self)
+        win.altsShowAll = false      -- every fresh open starts short again
+        AltMenu(self)
+    end)
     c.alts:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
         GameTooltip:AddLine("Make something else", 1, 0.82, 0.3)
@@ -348,41 +351,54 @@ AltMenu = function(owner)
     local step = cur and cur.step
     if not step then return end
     if not (MenuUtil and MenuUtil.CreateContextMenu) then return end
-    MenuUtil.CreateContextMenu(owner, function(_, root)
-        root:CreateTitle("Make instead")
-        root:CreateRadio("Let Skillwright choose", function() return not Plan.Preferred(prof, step.spell)
-            and not step.chosenByPlayer end, function() Plan.Prefer(prof, nil) end)
+    local rank = math.max(1, SW.Prof.Rank(prof))
+    -- WHAT THE MENU WILL NOT OFFER. A grey recipe gives nothing, ever - listing it is offering the
+    -- player a way to waste materials. Below that, the solver already refuses to PLAN anything under
+    -- CHANCE_FLOOR, and a menu that offers what the planner would reject is the guide arguing with
+    -- itself. The exception is a recipe you can make right now from what is in your bags: that is a
+    -- "use these up" offer rather than a plan, which is why it says how much skill it is worth.
+    local function worthOffering(yellow, grey, canMake)
+        if not (yellow and grey) then return true end     -- nothing to judge it on: leave it in
+        local chance = SW.Solver.Chance(yellow, grey, rank)
+        if chance <= 0 then return false end
+        return chance >= SW.Solver.CHANCE_FLOOR or (canMake or 0) > 0
+    end
+    -- Built as a list first, because how many there are decides how many are shown.
+    local rows = {}
+    local function row(spell, label) rows[#rows + 1] = { spell = spell, label = label } end
+    do
         -- everything that is a guaranteed skill-up right now, cheapest-to-finish first
         local listed = {}
         for _, o in ipairs(cur.orange or {}) do
             listed[o.spell] = true
-            local mats = {}
-            for i = 1, #o.mats, 2 do
-                mats[#mats + 1] = ("%dx %s"):format(o.mats[i + 1], U.ItemName and U.ItemName(o.mats[i])
-                    or (SW.ItemName(o.mats[i]) or ("item " .. o.mats[i])))
-            end
-            local label = ("%s  |cff8a8a8a%s|r"):format(U.RecipeName(o.spell), table.concat(mats, " + "))
-            if (o.canMake or 0) > 0 then
-                label = label .. ("  |cff40bf40you can make %d|r"):format(o.canMake)
-                -- and what those are worth, so "might as well use them up" has a number on it
-                for _, e in ipairs(Plan.Leftovers(prof) or {}) do
-                    if e.spell == o.spell then
-                        label = label .. (e.points >= 0.75
-                            and ("|cff8a8a8a, about %d skill|r"):format(math.floor(e.points + 0.5))
-                            or "|cff8a8a8a, probably no skill|r")
-                        break
+            if worthOffering(o.yellow, o.grey, o.canMake) then
+                local mats = {}
+                for i = 1, #o.mats, 2 do
+                    mats[#mats + 1] = ("%dx %s"):format(o.mats[i + 1], U.ItemName and U.ItemName(o.mats[i])
+                        or (SW.ItemName(o.mats[i]) or ("item " .. o.mats[i])))
+                end
+                local label = ("%s  |cff8a8a8a%s|r"):format(U.RecipeName(o.spell), table.concat(mats, " + "))
+                if (o.canMake or 0) > 0 then
+                    label = label .. ("  |cff40bf40you can make %d|r"):format(o.canMake)
+                    -- and what those are worth, so "might as well use them up" has a number on it
+                    for _, e in ipairs(Plan.Leftovers(prof) or {}) do
+                        if e.spell == o.spell then
+                            label = label .. (e.points >= 0.75
+                                and ("|cff8a8a8a, about %d skill|r"):format(math.floor(e.points + 0.5))
+                                or "|cff8a8a8a, probably no skill|r")
+                            break
+                        end
                     end
                 end
+                if (o.missing or 0) > 0 then
+                    label = label .. ("  |cff8a8a8a%s to buy|r"):format(SW.MoneyShort(o.missing))
+                end
+                row(o.spell, label)
             end
-            if (o.missing or 0) > 0 then
-                label = label .. ("  |cff8a8a8a%s to buy|r"):format(SW.MoneyShort(o.missing))
-            end
-            root:CreateRadio(label, function() return Plan.Preferred(prof, o.spell) end,
-                function() Plan.Prefer(prof, o.spell) end)
         end
         -- and the recipes that are interchangeable for the plan itself
         for _, a in ipairs(step.alts or {}) do
-            if not listed[a.spell] then
+            if not listed[a.spell] and worthOffering(a.yellow, a.grey, 0) then
                 local extra = (a.cost or 0) - (step.costEach or 0)
                 local label = U.RecipeName(a.spell)
                 if extra > 0 then
@@ -390,9 +406,38 @@ AltMenu = function(owner)
                 elseif extra < 0 then
                     label = label .. ("  |cff40bf40%s less each|r"):format(SW.MoneyShort(-extra))
                 end
-                root:CreateRadio(label, function() return Plan.Preferred(prof, a.spell) end,
-                    function() Plan.Prefer(prof, a.spell) end)
+                row(a.spell, label)
             end
+        end
+    end
+
+    -- HOW MANY TO SHOW. At Blacksmithing 97 there are two dozen recipes that would all give a
+    -- skill point, and a menu of two dozen is not a choice, it is a wall - the second time the
+    -- user has said a page of this addon shows too much. The list is already sorted by what you
+    -- would still have to buy, so the top of it is the part worth reading; the rest is one click
+    -- away rather than gone. A recipe you have already picked is always shown, whatever it costs.
+    local SHOW = 8
+    local shown = rows
+    if not win.altsShowAll and #rows > SHOW + 1 then
+        shown = {}
+        for _, r in ipairs(rows) do
+            if #shown < SHOW or Plan.Preferred(prof, r.spell) then shown[#shown + 1] = r end
+        end
+    end
+
+    MenuUtil.CreateContextMenu(owner, function(_, root)
+        root:CreateTitle("Make instead")
+        root:CreateRadio("Let Skillwright choose", function() return not Plan.Preferred(prof, step.spell)
+            and not step.chosenByPlayer end, function() Plan.Prefer(prof, nil) end)
+        for _, r in ipairs(shown) do
+            root:CreateRadio(r.label, function() return Plan.Preferred(prof, r.spell) end,
+                function() Plan.Prefer(prof, r.spell) end)
+        end
+        if #shown < #rows then
+            root:CreateButton(("|cff8a8a8aShow all %d|r"):format(#rows), function()
+                win.altsShowAll = true
+                AltMenu(owner)
+            end)
         end
     end)
 end
@@ -563,7 +608,20 @@ local function RefreshNow(f)
                 c.icon:Set(s.item, s.spell, StepTooltip(s))
                 c.icon:Show()
                 titleAt(true)
-                c.title:SetText(U.Colored(cur.color, U.RecipeName(s.spell)) .. (s.qty > 1 and (" |cff8a8a8ax" .. s.qty .. "|r") or ""))
+                -- A recipe the PLAYER asked for is named as theirs, on the line that names it.
+                -- The marker used to sit at the end of the "Make instead" sentence, which names a
+                -- DIFFERENT recipe - so a chosen step at 158 crafts read as Fastest recommending
+                -- 158 crafts over the 31 in the very next line. It also fired on `swapped`, which
+                -- is the guide substituting a recipe by itself: not the player's doing, and not
+                -- something to hand them the blame for.
+                local yours = ""
+                if Plan.Preferred(prof, s.spell) then
+                    yours = "  |cff40bf40(your choice)|r"
+                elseif cur.swapped then
+                    yours = "  |cff8a8a8a(swapped in - you cannot make the route's recipe)|r"
+                end
+                c.title:SetText(U.Colored(cur.color, U.RecipeName(s.spell))
+                    .. (s.qty > 1 and (" |cff8a8a8ax" .. s.qty .. "|r") or "") .. yours)
                 c.sub:SetText(("|cff8a8a8aAbout|r |cffffffff%d|r |cff8a8a8aof these takes you from skill|r "
                     .. "|cffffffff%d|r |cff8a8a8ato|r |cffffffff%d|r"):format(cur.left, cur.rank, s.to))
             end
@@ -792,10 +850,9 @@ local function RefreshNow(f)
                 elseif (other.missing or 0) > 0 then
                     bits[#bits + 1] = ("%s to buy"):format(SW.MoneyShort(other.missing))
                 end
-                showAlts(("|cff8a8a8aMake instead:|r |cffffd100%s|r |cff8a8a8a- %s%s|r%s")
+                showAlts(("|cff8a8a8aMake instead:|r |cffffd100%s|r |cff8a8a8a- %s%s|r")
                     :format(U.RecipeName(other.spell), table.concat(bits, ", "),
-                        #orange > 2 and (", +%d more"):format(#orange - 2) or "",
-                        (cur.swapped or (mine and mine.chosen)) and "  |cff40bf40(your choice)|r" or ""))
+                        #orange > 2 and (", +%d more"):format(#orange - 2) or ""))
                 place(c.alts, 4, 4)
             end
         elseif s.alts and #s.alts > 0 then
@@ -804,9 +861,8 @@ local function RefreshNow(f)
             local tail = extra > 0 and (", %s more each"):format(SW.MoneyShort(extra))
                 or (extra < 0 and (", %s less each"):format(SW.MoneyShort(-extra)) or ", same cost")
             local more = #s.alts > 1 and (" |cff8a8a8a(+%d more)|r"):format(#s.alts - 1) or ""
-            showAlts(("|cff8a8a8aMake instead:|r |cffffd100%s|r |cff8a8a8a- same skill-ups%s|r%s%s")
-                :format(U.RecipeName(a.spell), tail, more,
-                    s.chosenByPlayer and "  |cff40bf40(your choice)|r" or ""))
+            showAlts(("|cff8a8a8aMake instead:|r |cffffd100%s|r |cff8a8a8a- same skill-ups%s|r%s")
+                :format(U.RecipeName(a.spell), tail, more))
             place(c.alts, 4, 4)
         elseif (#(cur.orange or {}) > 0) or #(Plan.Leftovers(prof, s.spell) or {}) > 0 then
             -- nothing worth naming, but there IS something else you could make: say so plainly, so the
@@ -1023,7 +1079,10 @@ local function RouteRow(f, i)
     r.icon:SetSize(22, 22)
     r.bg = r:CreateTexture(nil, "BACKGROUND")
     r.bg:SetAllPoints()
-    r.bg:SetAtlas("Options_List_Active")
+    -- Not Options_List_Active: that atlas is not in this client, which is how the selected
+    -- mode button ended up with no marking at all. These rows had no background for the same
+    -- reason, and nobody noticed because a missing atlas simply draws nothing.
+    r.bg:SetColorTexture(1, 1, 1, 0.05)
     r.range = U.Text(r, "GameFontNormalSmall")
     r.range:SetPoint("LEFT", r.icon, "RIGHT", 6, 0)
     r.range:SetWidth(52)
@@ -1538,7 +1597,7 @@ local function UpdatePriceNote()
     local changed = text ~= note.shownText
     note.shownText = text
     win.body:ClearAllPoints()
-    win.body:SetPoint("BOTTOMRIGHT", -12, 40)
+    win.body:SetPoint("BOTTOMRIGHT", -10, 34)
     if text then
         if changed then
             note.text:SetText(text)
@@ -1550,12 +1609,14 @@ local function UpdatePriceNote()
         win.body:SetPoint("TOPLEFT", note, "BOTTOMLEFT", 0, -6)
     else
         note:Hide()
-        win.body:SetPoint("TOPLEFT", 16, -98)
+        win.body:SetPoint("TOPLEFT", 12, -90)
     end
 end
 
 local function Refresh()
     if not win or not win:IsShown() then return end
+    -- the drawing follows whatever the guide is about, including a profession it cannot plan
+    SW.SetCardArt(win.noGuideFor or win.prof)
     if UpdateDashboard() then return end
     ApplyMode()
     if SW.Settings().minimal then
@@ -1617,7 +1678,11 @@ local function Refresh()
             end
         end
     end
-    if unpriced then win.mode:Select(nil) end
+    -- The mode you are on is always marked, even when the other one cannot be planned. This used to
+    -- clear the selection outright whenever anything on the route had no price, so neither button
+    -- was marked and the window never said which mode it was showing you. Cheapest says so in its
+    -- own label ("Scan to see", "No prices") - that is not a reason to unmark Fastest.
+    win.mode:Select(SW.Settings().mode)
     UpdatePriceNote()
     local v = views[win.view]
     if v and v.frame then v.refresh(v.frame) end
@@ -1646,7 +1711,11 @@ local function SelectView(id)
         if vid == id then
             if not v.frame then
                 v.frame = CreateFrame("Frame", nil, win.body)
-                v.frame:SetAllPoints()
+                -- inside the frame, not on it. The panel's lines and corners are drawn on the
+                -- body's own bounds, so the content has to stand off them - including the
+                -- scrollbar, whose arrows were sitting on the top and bottom edges.
+                v.frame:SetPoint("TOPLEFT", 10, -10)
+                v.frame:SetPoint("BOTTOMRIGHT", -10, 10)
                 v.build(v.frame)
             end
             v.frame:Show()
@@ -1677,25 +1746,124 @@ local function HostOverhang(host)
     return math.max(0, far - edge)
 end
 
+-- WE ARE NOT THE ONLY ADDON ATTACHED TO THIS WINDOW. Profession Master, TradeSkillMaster, a skin
+-- that moves ProfessionsFrame - any of them can already be sitting where we want to be, and a guide
+-- printed over someone else's panel is worse than a guide the player has to move once.
+--
+-- The first attempt at this asked "is any shown frame in this rectangle", walking UIParent's
+-- children. It does not work, and the way it failed is the lesson: Blizzard's own containers -
+-- BottomManagedFrameContainer, the tooltip frames, the Edit Mode dialogs - are shown frames with
+-- real coordinates, so nearly every spot reads as occupied. The guide then found both sides taken,
+-- stopped attaching and appeared halfway across the screen. A test cannot catch that, because the
+-- harness has no Blizzard UI in it.
+--
+-- So the question is narrower and answerable: is something ANCHORED TO THIS WINDOW already there.
+-- An addon that puts a panel beside the profession window anchors it to the profession window;
+-- that is what "another addon changed this window" looks like from the outside. A frame that
+-- merely happens to be on screen is not our business and never was.
+--
+-- Everything here is wrapped, because reading a frame can raise. In Forever some frames are
+-- forbidden to addon code and even IsShown() on one throws - which it did, from this function.
+local hostBtn          -- our own button on the profession window: never something to dodge
+local function Try(fn, a, b)
+    local ok, v1, v2, v3, v4 = pcall(fn, a, b)
+    if ok then return v1, v2, v3, v4 end
+end
+
+local function Rect(f)
+    if not f then return end
+    if Try(f.IsForbidden, f) then return end
+    if not f.GetRight then return end
+    local l, r = Try(f.GetLeft, f), Try(f.GetRight, f)
+    local b, t = Try(f.GetBottom, f), Try(f.GetTop, f)
+    if not (l and r and b and t) then return end
+    return l, r, b, t
+end
+
+-- Frames that have made themselves part of this window: its own children, and anything at the top
+-- level that anchors to it.
+local function AttachedFrames(host)
+    local out = {}
+    local ok, kids = pcall(function() return { host:GetChildren() } end)
+    if ok then
+        for _, f in ipairs(kids) do out[#out + 1] = f end
+    end
+    for _, f in ipairs({ UIParent:GetChildren() }) do
+        for i = 1, (Try(f.GetNumPoints, f) or 0) do
+            local _, rel = Try(f.GetPoint, f, i)
+            if rel == host then
+                out[#out + 1] = f
+                break
+            end
+        end
+    end
+    return out
+end
+
+local function Occupied(x1, x2, y1, y2, host)
+    local hl, hr, hb, ht = Rect(host)
+    local hw = (hl and hr) and (hr - hl) or 0
+    local hh = (hb and ht) and (ht - hb) or 0
+    for _, f in ipairs(AttachedFrames(host)) do
+        if f ~= win and f ~= host and f ~= hostBtn and Try(f.IsShown, f) and (Try(f.GetAlpha, f) or 1) > 0.1 then
+            local l, r, b, t = Rect(f)
+            -- The window's own backdrop and nine-slice fill it edge to edge and mean nothing here.
+            -- Size alone does not identify them - an addon's panel beside the window can be just as
+            -- big - so what marks them out is that they sit INSIDE the window and cover most of it.
+            local inside = l and l >= hl - 2 and r <= hr + 2 and b >= hb - 2 and t <= ht + 2
+            local big = inside and hw > 0 and (r - l) > hw * 0.6 and (t - b) > hh * 0.6
+            if l and not big and (r - l) > 8 and (t - b) > 8 then
+                if l < x2 and r > x1 and b < y2 and t > y1 then return true, f end
+            end
+        end
+    end
+    return false
+end
+
+-- Put the guide against one side of the host, right first because that is where it has always been
+-- and where the player expects it. Returns false when neither side is free.
+local function AttachBeside(host)
+    local l, r, b, t = Rect(host)
+    if not l then
+        win:SetPoint("TOPLEFT", host, "TOPRIGHT", HostOverhang(host) + 4, 0)
+        return true
+    end
+    local w, h = win:GetWidth(), win:GetHeight()
+    local pad = HostOverhang(host) + 4
+    -- right, then left. A side that runs off the screen is not a side.
+    if r + pad + w <= UIParent:GetWidth() and not Occupied(r + pad, r + pad + w, t - h, t, host) then
+        win:SetPoint("TOPLEFT", host, "TOPRIGHT", pad, 0)
+        return true
+    end
+    if l - 4 - w >= 0 and not Occupied(l - 4 - w, l - 4, t - h, t, host) then
+        win:SetPoint("TOPRIGHT", host, "TOPLEFT", -4, 0)
+        return true
+    end
+    return false
+end
+
 -- Anchor: beside the open profession window when attached, else where the player left it.
 function SW.Anchor()
     if not win then return end
     win:ClearAllPoints()
     local host = ProfessionsFrame
     if win.attached and SW.Settings().attach and host and host:IsShown() then
-        win:SetPoint("TOPLEFT", host, "TOPRIGHT", HostOverhang(host) + 4, 0)
-        -- the tabs are laid out a moment after the window shows; measure again then
-        if not win.reanchoring then
-            win.reanchoring = true
-            C_Timer.After(0.1, function()
-                win.reanchoring = false
-                if win.attached and host:IsShown() then
-                    win:ClearAllPoints()
-                    win:SetPoint("TOPLEFT", host, "TOPRIGHT", HostOverhang(host) + 4, 0)
-                end
-            end)
+        if AttachBeside(host) then
+            -- the tabs are laid out a moment after the window shows; measure again then
+            if not win.reanchoring then
+                win.reanchoring = true
+                C_Timer.After(0.1, function()
+                    win.reanchoring = false
+                    if win.attached and host:IsShown() then
+                        win:ClearAllPoints()
+                        if not AttachBeside(host) then win.attached = false; SW.Anchor() end
+                    end
+                end)
+            end
+            return
         end
-        return
+        -- both sides are taken. Stop pretending to be attached rather than land on someone's panel.
+        win.attached = false
     end
     local pos = SW.DB().pos
     if pos and pos.x then
@@ -1752,7 +1920,7 @@ local function Build()
         close = CreateFrame("Button", nil, win, "UIPanelCloseButtonNoScripts")
         close:SetPoint("TOPRIGHT", 0, 1)
     end
-    close:SetScript("OnClick", function() win:Hide() end)
+    close:SetScript("OnClick", function() SW.CloseWindow() end)
 
     -- Profession picker
     local pb = CreateFrame("Button", nil, win)
@@ -1810,7 +1978,9 @@ local function Build()
         end
     end
     win.tabs = U.Tabs(win, tabItems, SelectView)
-    win.tabs:SetPoint("TOPLEFT", 16, -58)
+    -- well in from the panel's left corner, so they belong to the frame rather than starting at
+    -- the very edge of it
+    win.tabs:SetPoint("TOPLEFT", 26, -58)
     local divider = win:CreateTexture(nil, "ARTWORK")
     divider:SetAtlas("Options_HorizontalDivider")
     divider:SetHeight(1)
@@ -1818,8 +1988,48 @@ local function Build()
     divider:SetPoint("TOPRIGHT", -16, -91)
 
     win.body = CreateFrame("Frame", nil, win)
-    win.body:SetPoint("TOPLEFT", 16, -98)
-    win.body:SetPoint("BOTTOMRIGHT", -12, 40)
+    -- The tabs are 33 tall from y = -58, so their baseline is -91 and the panel starts one pixel
+    -- under it. Overlapping them into the panel was tried and looks worse: common-insideframe is a
+    -- single drawn texture with its own top edge, so a tab on top of it covers part of that line
+    -- and leaves a break rather than joining. A nine-slice could open a seam where the tab sits;
+    -- one stretched texture cannot.
+    win.body:SetPoint("TOPLEFT", 12, -90)
+    win.body:SetPoint("BOTTOMRIGHT", -10, 34)
+
+    -- The profession window's own panel art, so the guide reads as part of it rather than as
+    -- a box parked next to it. Both names come from Blizzard's XML for this build, not from
+    -- memory: Profession-Background-Template2 is the illustration behind the crafting page
+    -- (Blizzard_ProfessionsFrame.xml) and common-insideframe is the inner panel with the thin
+    -- lines and the corner pieces (Blizzard_ProfessionsRecipeSchematicForm.xml).
+    --
+    -- Checked before use. An atlas that is not in this client fails silently and leaves an
+    -- untextured rectangle, which is how the selected mode button ended up invisible.
+    local function atlas(tex, name)
+        if C_Texture and C_Texture.GetAtlasInfo and not C_Texture.GetAtlasInfo(name) then
+            SW.dbg("no atlas %s in this client", name)
+            tex:Hide()
+            return false
+        end
+        tex:SetAtlas(name)
+        return true
+    end
+
+    -- The drawing sits behind everything and is drawn faint: it is a watermark, not a picture,
+    -- and the words on top of it have to stay the easiest thing to read. It lives on the WINDOW
+    -- rather than on the body, so nothing inside the body can cover it, and changes with the
+    -- profession in SetCardArt below.
+    win.art = win:CreateTexture(nil, "BORDER", nil, -8)
+    win.art:SetPoint("TOPLEFT", win.body, "TOPLEFT", 0, 0)
+    win.art:SetPoint("BOTTOMRIGHT", win.body, "BOTTOMRIGHT", 0, 0)
+    win.art:SetAlpha(0.5)
+    win.atlasOK = atlas
+
+    -- and the lines and corners around it, on the body's own bounds: they used to reach six pixels
+    -- past it on every side, which put them through the scrollbar
+    win.inset = win.body:CreateTexture(nil, "BORDER")
+    win.inset:SetPoint("TOPLEFT", 0, 0)
+    win.inset:SetPoint("BOTTOMRIGHT", 0, 0)
+    atlas(win.inset, "common-insideframe")
 
     -- "No auction prices yet": a strip above the tabs' content while there is nothing to cost a route with
     local note = CreateFrame("Frame", nil, win)
@@ -1909,13 +2119,68 @@ local function Build()
         SW.Prof.ScanRanks()
         SW.RefreshWindow()
     end)
-    win:HookScript("OnHide", function() win.dashSkip = false end)
+    -- This used to decide, from inside Hide(), whether the PLAYER had closed the guide - by
+    -- assuming any hide the addon had not wrapped was theirs. It is not knowable here, and the
+    -- case it got wrong is the common one: Escape over the profession window runs LibForever's
+    -- escape stand-in first, and that hides the frontmost of our windows before TRADE_SKILL_CLOSE
+    -- arrives. So Escape always counted as closing the guide for good. The decision is a saved
+    -- setting now, written by the two controls that mean it.
+    win:HookScript("OnHide", function()
+        win.dashSkip = false
+        win.autoShown = false
+        SW.UpdateHostButton()
+    end)
     win:Hide()
+end
+
+-- The drawing the profession window puts behind its page, one per profession. The names are
+-- from the client's own atlas table, not from a spelling in Blizzard's XML: the XML says
+-- "Profession-Background-Template2" and what exists is "profession-background-template2-c60".
+local CARD_ART = {
+    [164] = "blacksmithing", [165] = "leatherworking", [171] = "alchemy",   [197] = "tailoring",
+    [202] = "engineering",   [333] = "enchanting",     [185] = "cooking",   [129] = "firstaid",
+    [186] = "mining",        [182] = "herbalism",      [393] = "skinning",  [356] = "fishing",
+}
+
+-- What the profession window is drawing behind its own page, right now. This beats any name
+-- we can write down: it is right for this profession, this build and this client because it
+-- IS what the client chose. Wrapped, because reading another addon's frame can raise.
+local function LiveCardArt()
+    local page = ProfessionsFrame and ProfessionsFrame.CraftingPage
+    local bg = page and page.SchematicForm and page.SchematicForm.Background
+    if not (bg and bg.GetAtlas) then return end
+    local ok, atlasName = pcall(bg.GetAtlas, bg)
+    -- a string or nothing: GetAtlas returns nil for a plain texture, and anything else is not a
+    -- name we can hand to SetAtlas
+    if ok and type(atlasName) == "string" and atlasName ~= "" then return atlasName end
+end
+
+function SW.SetCardArt(prof)
+    if not (win and win.art) then return end
+    -- the live one when the window is open; the table when the guide was opened on its own
+    local name = LiveCardArt()
+    if not name then
+        local suffix = CARD_ART[prof]
+        name = suffix and ("profession-background-card-%s-c60"):format(suffix)
+    end
+    if not name then
+        win.art:Hide()
+        return
+    end
+    if win.atlasOK and win.atlasOK(win.art, name) then win.art:Show() end
 end
 
 -- Show the guide for a profession (nil = the best guess) on a tab (nil = keep the current one).
 function SW.ShowWindow(prof, view, attached)
     Build()
+    SW.Settings().guideClosed = false      -- they asked for it back
+    -- A profession we carry no recipes for has no plan to show, and asking for one anyway walks
+    -- into Plan with nil data and throws. Callers should not have to know that.
+    if prof and not SW.PROFESSIONS[prof] then prof = nil end
+    -- "Skillwright has no guide for Mining" is about the profession window that was open, not about
+    -- the guide. Asking for a profession by name answers it, and leaving it set meant the card kept
+    -- apologising for a window that had long since closed.
+    if prof then win.noGuideFor = nil end
     win.prof = prof or win.prof or SW.DefaultProf()
     if not win.prof then return end
     SW.CharDB().lastProf = win.prof
@@ -1931,25 +2196,160 @@ function SW.ShowWindow(prof, view, attached)
     SelectView(view or win.view or "now")
 end
 
+-- The player closing the guide, as opposed to it going away with the window it sits beside.
+function SW.CloseWindow()
+    SW.Settings().guideClosed = true
+    if win then win:Hide() end
+    SW.UpdateHostButton()
+end
+
 function SW.ToggleWindow()
-    if win and win:IsShown() then win:Hide() else SW.ShowWindow() end
+    if win and win:IsShown() then SW.CloseWindow() else SW.ShowWindow() end
 end
 
 function SW.WindowShown() return win and win:IsShown() end
 
+-- THE WAY BACK. Closing the guide sticks, so there has to be somewhere obvious to get it again,
+-- and the profession window is where the player already is.
+--
+-- It is one of that window's own side tabs, built from the same template Blizzard builds the
+-- profession tabs from (Blizzard_ProfessionsFrame.xml: ProfessionsFrameRightTabTemplateWrapper,
+-- each tab anchored TOPLEFT to the one above it, 2 pixels down). So it is not a lookalike - it is
+-- the same widget with our icon in it, and it stays right whatever the client does to that art.
+--
+-- The first attempt was a button on the title bar. It was the wrong idea twice over: it sat where
+-- other addons like to put theirs, and it looked bolted on. This column already means "another
+-- page of this window", which is what the guide is.
+local hostTab
+local function BuildHostTab()
+    local host = ProfessionsFrame
+    if hostTab or not host then return end
+    -- The template comes with Blizzard_Professions, which is loaded on demand. If it is not there,
+    -- we simply have no tab: the minimap button and /skw are the way in, and a hand-drawn
+    -- imitation would be worse than nothing.
+    -- Blizzard declares these tabs as <Frame> in XML and then calls SetChecked on them, so the
+    -- type CreateFrame wants is not something the XML can be read for. Try each, and take the
+    -- first that comes back with the icon the template is supposed to provide.
+    for _, kind in ipairs({ "CheckButton", "Button", "Frame" }) do
+        local ok, f = pcall(CreateFrame, kind, "SkillwrightHostTab", host,
+            "ProfessionsFrameRightTabTemplateWrapper")
+        if ok and f and f.Icon then
+            hostTab = f
+            SW.dbg("host tab built from the profession template as a %s", kind)
+            break
+        end
+        if ok and f then f:Hide() end
+    end
+    if not hostTab then
+        -- No template, so no lookalike: a hand-drawn copy of Blizzard's art would be wrong the
+        -- first time they change it. A plain square in the same column is honest and still gets
+        -- the player back to the guide.
+        SW.dbg("no profession tab template - falling back to a plain button")
+        hostTab = CreateFrame("Button", "SkillwrightHostTab", host)
+        hostTab:SetSize(32, 32)
+        hostTab.Icon = hostTab:CreateTexture(nil, "ARTWORK")
+        hostTab.Icon:SetPoint("TOPLEFT", 3, -3)
+        hostTab.Icon:SetPoint("BOTTOMRIGHT", -3, 3)
+        local edge = hostTab:CreateTexture(nil, "BACKGROUND")
+        edge:SetAllPoints()
+        edge:SetColorTexture(0, 0, 0, 0.6)
+        local hl = hostTab:CreateTexture(nil, "HIGHLIGHT")
+        hl:SetAllPoints()
+        hl:SetColorTexture(1, 1, 1, 0.2)
+        hostTab:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine(self.tooltipText or "Skillwright", 1, 0.82, 0)
+            GameTooltip:Show()
+        end)
+        hostTab:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+    _G.SkillwrightHostButton = hostTab      -- the name the tests and /skw know it by
+    hostTab.Icon:SetTexture("Interface\\AddOns\\Skillwright\\Media\\minimap")
+    hostTab.tooltipText = "Skillwright"
+    hostTab:SetScript("OnClick", function()
+        if SW.WindowShown() then
+            SW.CloseWindow()    -- pressing the tab to close is the player deciding, and it sticks
+            return
+        end
+        local open = SW.Prof.OpenLine()
+        if open and SW.PROFESSIONS[open] then
+            SW.ShowWindow(open, nil, true)
+        else
+            -- Mining, Herbalism, Fishing. Open on a profession we can actually guide - the one they
+            -- were last on, or their first - rather than on a page that only says no. If they have
+            -- none at all there is nothing to fall back to, and then the card says so plainly.
+            local fallback = SW.DefaultProf()
+            SW.ShowWindow(fallback, nil, true)
+            if not (fallback and SW.PROFESSIONS[fallback]) then
+                win.noGuideFor = open
+                SW.RefreshWindow()
+            end
+        end
+        win.autoShown = false   -- they asked for it by hand; it does not vanish with the host
+        SW.UpdateHostButton()
+    end)
+end
+
+-- Place it under the last profession tab, and keep it there when that number changes.
+function SW.UpdateHostButton()
+    local host = ProfessionsFrame
+    if not host or not host:IsShown() then
+        if hostTab then hostTab:Hide() end
+        return
+    end
+    -- The tab is part of the column, so it stays in it. Hiding it for Mining or Fishing made the
+    -- column change length as the player clicked between professions, and a tab that comes and goes
+    -- does not look like it belongs there. What it does when pressed is where honesty lives, not
+    -- whether it is there at all.
+    BuildHostTab()
+    if not hostTab then return end
+
+    -- the last tab the client is actually showing; it hides the unused ones at the end
+    local above = host.ProfessionsOverviewTab
+    for _, tab in ipairs(host.rightProfessionTabs or {}) do
+        if tab ~= hostTab and tab:IsShown() then above = tab end
+    end
+    hostTab:ClearAllPoints()
+    if above then
+        hostTab:SetPoint("TOPLEFT", above, "BOTTOMLEFT", 0, -2)
+    else
+        hostTab:SetPoint("TOPLEFT", host, "TOPRIGHT", 0, -60)
+    end
+    -- lit while the guide is up, exactly as the tab of the page you are on
+    if hostTab.SetChecked then hostTab:SetChecked(SW.WindowShown() and true or false) end
+    -- the template draws its own tooltip from this, so it has to say what pressing it will do
+    local open = SW.Prof.OpenLine()
+    if open and not SW.PROFESSIONS[open] then
+        hostTab.tooltipText = "Skillwright - no route for " .. (SW.ProfName(open) or "this one")
+    else
+        hostTab.tooltipText = "Skillwright"
+    end
+    hostTab:Show()
+end
+
+-- A hide the ADDON decided on: the profession window closed, or opened onto something we have no
+-- guide for. It must not read as the player dismissing the guide, or the guide never comes back.
+local function AutoHide()
+    win.autoHiding = true
+    win:Hide()
+    win.autoHiding = false
+    win.autoShown = false
+end
+
 -- Opening a profession window opens (and attaches) its guide; closing it closes a guide it opened.
-SW.Listen("PROFESSION_OPEN", function(id)
+local function OnProfessionOpen(id)
     -- A profession we have no guide for (Mining's smelting, Herbalism, Fishing): the guide has nothing
     -- to say about it, so it must not sit beside that window showing a different profession's route.
     if not SW.PROFESSIONS[id] then
         if win and win:IsShown() then
             if win.autoShown then
-                win:Hide()                 -- it came with a profession window; it goes with this one
-                win.autoShown = false
+                AutoHide()                 -- it came with a profession window; it goes with this one
             else
-                -- the player opened it: stay, but say plainly that we have nothing for this one rather
-                -- than leaving another profession's plan on screen next to a window it is not about
-                win.attached = false
+                -- The player opened it, so it stays - beside the window, where it was. It used to
+                -- detach here, which sent it to its free-floating position the moment you clicked
+                -- Fishing: from the player's side the guide simply jumped across the screen. The
+                -- window is still open and the guide still belongs next to it; all that changed is
+                -- that it has nothing to plan, and the card says so.
                 win.noGuideFor = id
                 SW.Anchor()
                 SW.RefreshWindow()
@@ -1969,29 +2369,49 @@ SW.Listen("PROFESSION_OPEN", function(id)
         end
         return
     end
-    if SW.Settings().autoOpen then
+    if SW.Settings().autoOpen and not SW.Settings().guideClosed then
         SW.ShowWindow(id, nil, true)
         win.autoShown = true
     end
+end
+
+-- Blizzard rebuilds its side tabs when the professions change, and ours sits under the last one.
+local hookedTabs
+local function HookTabRefresh()
+    if hookedTabs or not (ProfessionsFrame and ProfessionsFrame.RefreshRightTabs) then return end
+    hookedTabs = true
+    hooksecurefunc(ProfessionsFrame, "RefreshRightTabs", function() SW.UpdateHostButton() end)
+end
+
+SW.Listen("PROFESSION_OPEN", function(id)
+    OnProfessionOpen(id)
+    HookTabRefresh()
+    -- Whatever that decided, the profession window is open and needs its button. This used to sit
+    -- at the end of the handler, below two returns - including the one for "the guide is already
+    -- showing", which is the path nearly every profession window takes. The button was therefore
+    -- missing exactly when the player was looking at it.
+    SW.UpdateHostButton()
+    -- the tabs and the title bar are laid out a moment later, and the button dodges them
+    C_Timer.After(0.1, SW.UpdateHostButton)
 end)
 SW.Listen("PROFESSION_CLOSED", function()
     if not win or not win:IsShown() then return end
-    if win.noGuideFor then
-        win.noGuideFor = nil
-        SW.RefreshWindow()
-    end
-    if win.autoShown then
-        win:Hide()
-        win.autoShown = false
-    else
-        win.attached = false
-        SW.Anchor()
-    end
+    win.noGuideFor = nil
+    -- It goes with the window, whoever opened it. It used to stay and detach when the PLAYER had
+    -- opened it, which put a lone guide in the middle of the screen the moment they pressed Escape
+    -- - it had not reopened, it had jumped, but there is no way to tell those apart by looking.
+    -- That rule dates from before there was a tab to get the guide back with.
+    --
+    -- This is the addon's doing, not the player's, so it does NOT count as dismissing the guide:
+    -- the next profession window brings it back. Only the X, Escape or the tab keep it away.
+    AutoHide()
 end)
 -- The profession window can be moved by the UI panel manager; re-anchor when it is (re)shown.
 SW.Listen("LOGIN", function()
     hooksecurefunc("ShowUIPanel", function(frame)
-        if frame == ProfessionsFrame and win and win.attached then SW.Anchor() end
+        if frame ~= ProfessionsFrame then return end
+        if win and win.attached then SW.Anchor() end
+        SW.UpdateHostButton()
     end)
 end)
 

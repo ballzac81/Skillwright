@@ -77,9 +77,16 @@ function U.Segmented(parent, items, width, onSelect)
         local b = CreateFrame("Button", nil, ctl)
         b:SetSize(segW - 2, 22)
         b:SetPoint("LEFT", (i - 1) * segW, 0)
+        -- A plain colour, not an atlas: an atlas that is missing in this client fails silently and
+        -- the control then has no visible selection at all, which is how it shipped.
         b.bg = b:CreateTexture(nil, "BACKGROUND")
         b.bg:SetAllPoints()
-        b.bg:SetAtlas("Options_List_Active")
+        b.bg:SetColorTexture(1, 0.82, 0.2, 0.16)
+        b.edge = b:CreateTexture(nil, "ARTWORK")
+        b.edge:SetPoint("BOTTOMLEFT", 2, 0)
+        b.edge:SetPoint("BOTTOMRIGHT", -2, 0)
+        b.edge:SetHeight(2)
+        b.edge:SetColorTexture(1, 0.82, 0.2, 0.9)
         local hl = b:CreateTexture(nil, "HIGHLIGHT")
         hl:SetAllPoints()
         hl:SetAtlas("Options_List_Hover")
@@ -106,7 +113,11 @@ function U.Segmented(parent, items, width, onSelect)
         for _, b in ipairs(self.buttons) do
             local on = b.value == value
             b.bg:SetShown(on)
-            b.fs:SetFontObject(on and "GameFontHighlightSmall" or "GameFontNormalSmall")
+            b.edge:SetShown(on)
+            -- white on the one you are using, grey on the one you are not. The old pair was
+            -- GameFontHighlight against GameFontNormal - white against gold - which reads as two
+            -- styles of label rather than on against off.
+            b.fs:SetFontObject(on and "GameFontHighlightSmall" or "GameFontDisableSmall")
         end
         if fire and onSelect then onSelect(value) end
     end

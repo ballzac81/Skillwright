@@ -155,13 +155,23 @@ function D.Print(onlyIfDebug)
     if onlyIfDebug then SW.dbg("%s", line) else SW.msg("%s", line) end
 end
 
--- Once per profession window. It used to run on every update too, which meant a full pass (and 25
--- schematic reads) after every single craft - felt as lag while crafting.
-local done
+-- ONCE PER PROFESSION, PER SESSION. It used to run on every update, which meant a full pass
+-- (and 25 schematic reads) after every single craft and felt as lag. Then it was once per
+-- window - but `done` held a single profession and was cleared on close, so Blacksmithing to
+-- Cooking and back read all two thousand schematics three times, and so did closing and
+-- reopening the window.
+--
+-- The repeats cannot find anything: from a real log, "2147 recipes compared, grey differs 0,
+-- skill-ups differ 0, reagents differ 0 of 2079 read". At 2-8 ms this was never lag; it was
+-- work with a known answer, and most of what the debug log had to say.
+--
+-- What can still change the answer is learning a recipe: that profession has a schematic we
+-- have not read, so it is compared again when its recipe list changes. A reload starts over.
+local done = {}
 SW.Listen("PROFESSION_OPEN", function(prof)
     if not SW.PROFESSIONS[prof] then return end    -- gathering: no recipes of ours to compare against
-    if done == prof then return end
-    done = prof
+    if done[prof] then return end
+    done[prof] = true
     SW.Debounce("drift", 1, function() D.Scan(prof) end)
 end)
-SW.Listen("PROFESSION_CLOSED", function() done = nil end)
+SW.Listen("RECIPES_CHANGED", function(prof) if prof then done[prof] = nil end end)
