@@ -76,11 +76,14 @@ function Page.Build(f)
     }, 180, function(v) SW.SetMode(v) end)
     f.mode:SetPoint("LEFT", 70, 0)
 
-    -- Fastest trades crafts for lighter materials, but only this far. Said as what it is: how much
-    -- longer you are willing to take. No exchange rate between gold and time - just a ceiling.
-    text("|cffffd100Fastest|r is the fewest crafts, and never more than that. Where several routes "
-        .. "need the same number, it takes the one whose materials are easier to come by. It reads no "
-        .. "prices at all, so the Fastest route is the same for everyone.", nil, 4, 4)
+    -- Fastest counts crafts. The two sentences that used to follow this one described a
+    -- tolerance and then a material tie-break, and both are gone: the user's rule is that
+    -- Fastest does not read price of any kind, and "which materials are easier to come by"
+    -- was vendor sell value wearing a friendlier name.
+    text("|cffffd100Fastest|r is the fewest crafts, and never more than that. It reads no prices "
+        .. "at all and asks nothing about your gold - it assumes you can buy or farm what a step "
+        .. "needs - so the Fastest route is the same for everyone. |cffffd100Cheapest|r is the mode "
+        .. "that spends your money, and the one that asks what things cost.", nil, 4, 4)
     checkbox("Prefer materials from vendors", "preferVendor",
         "Recipes whose materials you can simply buy come first, even if that means a few more crafts.",
         function() Plan.Invalidate() end)

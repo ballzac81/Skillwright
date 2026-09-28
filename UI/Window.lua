@@ -1049,9 +1049,12 @@ local function RefreshNow(f)
     if otherSpell then
         local fastName = SW.Settings().mode == "fast" and U.RecipeName(s.spell) or U.RecipeName(otherSpell)
         local cheapName = SW.Settings().mode == "fast" and U.RecipeName(otherSpell) or U.RecipeName(s.spell)
+        -- What they actually disagree about. This used to say Fastest weighs materials by what
+        -- a vendor pays, which stopped being true the day the weighting came out and went on being
+        -- printed on the card - the one place a player would read it and believe it.
         c.diverge:SetText(("|cff8a8a8aFastest says|r %s|cff8a8a8a, Cheapest says|r %s|cff8a8a8a - they "
-            .. "disagree because Fastest weighs materials by what a vendor pays and Cheapest by what the "
-            .. "auction actually charges. With a scan this fresh, Cheapest has the better numbers.|r")
+            .. "disagree because Fastest counts crafts and reads no price at all, while Cheapest ranks "
+            .. "by what the auction charges. With a scan this fresh, Cheapest has the better numbers.|r")
             :format(fastName, cheapName))
         place(c.diverge, 4, 4)
     end
@@ -1945,7 +1948,7 @@ local function Build()
     -- Cheapest / Fastest
     win.mode = U.Segmented(win, {
         { value = "cheap", label = "Cheapest", tooltip = "The least gold per skill point, from market prices." },
-        { value = "fast", label = "Fastest", tooltip = "The fewest crafts per skill point (orange and yellow recipes first)." },
+        { value = "fast", label = "Fastest", tooltip = "The fewest crafts. It reads no prices at all." },
     }, 136, function(v, btn)
         -- "Cheapest" with nothing to rank is a promise we cannot keep: offer the scan instead of a fake
         -- route. But only when the CHEAP route really cannot be costed - not when the fast one on screen

@@ -36,8 +36,8 @@
   under the name that describes it - and says in chat how to switch back. If you have scanned, your
   choice is untouched.
 - **When Fastest and Cheapest would make different things right here**, the card says so and says which
-  to believe: they disagree because Fastest weighs materials by what a vendor pays and Cheapest by what
-  the auction actually charges. Only on a step where they really differ - never as a standing note.
+  to believe: they disagree because Fastest counts crafts and reads no price at all, while Cheapest
+  ranks by what the auction charges. Only on a step where they really differ - never as a standing note.
 
 ### Learning recipes
 
