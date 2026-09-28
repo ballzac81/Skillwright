@@ -196,7 +196,15 @@ ScanOpen = function()
         end
         return
     end
-    if not SW.PROFESSIONS[id] then pendingOpen = false return end   -- a gathering profession
+    if not SW.PROFESSIONS[id] then
+        -- A gathering profession: nothing to plan, but the guide still has to KNOW, or it sits there
+        -- showing another profession's route beside a window it has nothing to do with. Announced the
+        -- same way as any other, so whoever is listening decides what that means for them.
+        local was = pendingOpen
+        pendingOpen = false
+        if was or (before and id ~= before) then SW.Fire("PROFESSION_OPEN", id) end
+        return
+    end
     RememberName(id, (info.parentProfessionName and info.parentProfessionName ~= "") and info.parentProfessionName or info.professionName)
     local p = SW.CharProf(id)
     local level, maxLevel = info.skillLevel, info.maxSkillLevel
@@ -253,9 +261,25 @@ end
 
 SW.On("TRADE_SKILL_SHOW", function()
     windowOpen, pendingOpen, retries = true, true, 0
+    open = nil                                   -- a new window: what we knew is about the old one
     SW.Debounce("scanTrade", 0.05, ScanOpen)     -- the guide should follow the window, not trail it
 end)
-SW.On("TRADE_SKILL_LIST_UPDATE", function() if windowOpen then SW.Debounce("scanTrade", 1, ScanOpen) end end)
+SW.On("TRADE_SKILL_LIST_UPDATE", function()
+    if not windowOpen then return end
+    -- Only a switch invalidates what we know; a rescan of the same window (a craft, a new recipe)
+    -- must not throw it away, or every craft would blink the guide.
+    local now = ReadOpen()
+    if open and (not now or now.id ~= open.id) then
+        open = nil
+        pendingOpen, retries = true, 0            -- a different profession: the guide has to catch up
+    end
+    -- THE SLOW PROFESSION SWITCH. Debounce CANCELS the pending timer and starts a new one, so a flat
+    -- one second here threw away the 0.05 s retry that TRADE_SKILL_SHOW had just scheduled - and this
+    -- event fires again and again while the list fills, each time pushing the scan another second
+    -- into the future. The fast ladder was measured and put in place months ago and never once ran.
+    -- While the guide has not caught up with this window, this event is part of the OPENING.
+    SW.Debounce("scanTrade", pendingOpen and 0.05 or 1, ScanOpen)
+end)
 SW.On("NEW_RECIPE_LEARNED", function()
     if windowOpen then SW.Debounce("scanTrade", 1, ScanOpen) else SW.Debounce("scanKnown", 1, P.ScanKnownSpells) end
 end)

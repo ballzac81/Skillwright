@@ -158,7 +158,6 @@ function Plan.Options(prof, from)
         pricesAreGuesses = SW.Prices.Status() == "none" or SW.Prices.Status() == "stale",
         mode = s.mode,
         -- only Fastest trades crafts for lighter materials; Cheapest has real prices and uses them
-        tolerance = s.craftTolerance or 0,
         known = cp.known,
         learnRanks = db.learnRanks,
         vendorPrices = db.vendor,
@@ -345,26 +344,83 @@ end
 
 -- Is the route we are showing planned without prices? True when any material has no vendor price and
 -- no auction price, which is most of them until the player scans.
---- Why a step that is not a guaranteed skill-up can still be the right one: what the surest
---- alternative would cost for the same skill points. This is the comparison the solver already made,
---- read back out - not a new one. Returns the alternative and the extra gold it would take, and
---- nothing at all when the step IS the sure thing, when no priced sure thing exists, or when the sure
---- thing is not actually dearer (then there is nothing to explain).
-function Plan.YellowTradeOff(cur)
-    if not (cur and cur.step and cur.orange) then return nil end
-    local rank = cur.rank or 0
-    local mine = SW.Solver.Chance(cur.step.yellow, cur.step.grey, rank)
-    if not mine or mine >= 1 then return nil end        -- the step is orange: nothing to explain
-    local mineCost = (Plan.StepCost(cur.step) or 0) * (cur.left or 1)
-    if mineCost <= 0 then return nil end
-    local best
-    for _, o in ipairs(cur.orange) do
-        if o.guaranteed and o.spell ~= cur.step.spell and o.total and o.total > 0 then
-            if not best or o.total < best.total then best = o end
+--- What the materials already in your bags are worth in skill, for recipes you know. This answers the
+--- question a player asks the guide silently: "I have forty Rough Stone left - should I just use them
+--- up and hope?" The guide used to say nothing, so they had to guess, and guessing against the plan
+--- feels like the plan missed something. It did not: forty Rough Stone at skill 82 is twenty crafts at
+--- 7.5%, which is one or two points. That is not advice, it is the number - and with it in front of
+--- them the choice is theirs and the guide has stopped hiding.
+--- Returns a list, best first: { spell, crafts, chance, points }.
+function Plan.Leftovers(prof, exceptSpell)
+    local rank = math.max(1, SW.Prof.Rank(prof))
+    local cur = Plan.Current(prof)
+    local to = (cur and cur.step and cur.step.to) or SW.Ceiling(prof)
+    local out = {}
+    for _, o in ipairs(Plan.Orange(prof, rank, to)) do
+        local can = o.canMake or 0
+        if can > 0 and o.spell ~= exceptSpell then
+            local p = SW.Solver.Chance(o.yellow, o.grey, rank)
+            if p > 0 then
+                -- where it lands you, craft by craft: the odds fall as the rank climbs, so walking it
+                -- is the only honest way to say "this takes you to 91".
+                local at, left = rank, can
+                while left > 0 do
+                    local step = SW.Solver.Chance(o.yellow, o.grey, at)
+                    if step <= 0 then break end
+                    at = at + step            -- expected points from one craft
+                    left = left - 1
+                end
+                out[#out + 1] = { spell = o.spell, crafts = can, chance = p,
+                                  points = at - rank, reaches = math.floor(at) }
+            end
         end
     end
-    if not best or best.total <= mineCost then return nil end
-    return best, best.total - mineCost
+    table.sort(out, function(a, b) return a.points > b.points end)
+    return out
+end
+
+--- How far the gold in your pocket takes you along the route. Every material is bought - that is the
+--- model, and what you already carry is simply gold you do not have to spend again - so "the rest costs
+--- 16g" is only useful next to what you have. Walks the route spending as it goes and stops where the
+--- purse does, counting a part-finished step for the skill it would actually buy.
+--- Returns the rank your money reaches, and the cost of the whole rest, or nil when we cannot price it.
+function Plan.GoldReach(prof)
+    local route = Plan.Route(prof)
+    if not route or not GetMoney then return nil end
+    local purse = GetMoney() or 0
+    local rank = math.max(1, SW.Prof.Rank(prof))
+    local left, reach, total = purse, rank, 0
+    for _, s in ipairs(route.steps) do
+        if rank < s.to then
+            local crafts = rank > s.from and Plan.CraftsLeft(s, rank) or s.crafts
+            local each, known = Plan.StepCost(s)
+            if not known or each == nil then return nil end        -- a step we cannot price: no answer
+            local cost = each * crafts
+            total = total + cost
+            if left >= cost then
+                left = left - cost
+                reach = s.to
+            elseif cost > 0 and left > 0 then
+                -- part of the way: the skill the remaining gold would actually buy
+                local span = s.to - math.max(rank, s.from)
+                reach = math.max(reach, math.floor(math.max(rank, s.from) + span * (left / cost)))
+                left = 0
+            end
+        end
+    end
+    return reach, total, purse
+end
+
+--- What this step asks you to spend that you do not have. A plan you cannot pay for is not a plan:
+--- "buy 300 Bronze Bars for 16g" reads as an instruction until you notice you have two gold, and then
+--- it reads as the addon not paying attention. Returns the shortfall, or nil when it is affordable or
+--- when we cannot price it anyway.
+function Plan.Shortfall(cur)
+    if not (cur and (cur.missingCost or 0) > 0) then return nil end
+    if not GetMoney then return nil end
+    local purse = GetMoney() or 0
+    if cur.missingCost <= purse then return nil end
+    return cur.missingCost - purse, purse
 end
 
 --- What a vendor pays for what this step makes, for the whole step. Half the reason a step with dear
@@ -387,7 +443,20 @@ end
 
 function Plan.PricesUnknown(prof)
     local r = Plan.RouteIfReady(prof)
-    return r ~= nil and r.pricesUnknown == true
+    if not r then return false end
+    if (r.pricedTo or 0) > r.from then return false end   -- part of it really was planned on price
+    return r.pricesUnknown == true
+end
+
+--- How far Cheapest can go for this profession, and whether we actually know yet. The question is
+--- about the OTHER button, so it asks the cheap route even while Fastest is on screen - and when that
+--- route has not been worked out, it says so rather than letting the caller assume the worst.
+--- Returns: reach (nil when it cannot rank anything), known (false when there is no cheap route yet).
+function Plan.CheapReach(prof)
+    local r = Plan.RouteIfReady(prof, "cheap")
+    if not r then return nil, false end
+    if (r.pricedTo or 0) > r.from then return r.pricedTo, true end
+    return nil, true
 end
 
 -- The route we already have, or nil. Never starts a solve: for callers that are only asking a question,
@@ -410,6 +479,27 @@ function Plan.RouteNow(prof, mode)
     r = SW.Solver.Solve(prof, opts)
     if r then Keep(prof, mode, r) end
     return r
+end
+
+--- The two modes naming DIFFERENT recipes for the step the player is standing on. That is the only
+--- moment the difference between them is worth a sentence: a player who sees Fastest say grinding
+--- stones and Cheapest say bronze does not want to know which weighting method this is, they want to
+--- know which to believe.
+--- Returns the recipe the OTHER mode would make here, or nothing at all - which is the usual answer,
+--- because the two modes agree on most steps.
+--- Only ever answers with real auction prices behind it: with none, Cheapest is Fastest under another
+--- name and there is nothing to disagree about; with a stale scan we have no business recommending
+--- either. It never starts a solve of its own - if the other route is not worked out yet, no line.
+function Plan.Divergence(prof, spell)
+    local status = SW.Prices.Status()
+    if status ~= "addon" and status ~= "scan" then return nil end
+    local mode = SW.Settings().mode
+    local other = mode == "fast" and "cheap" or "fast"
+    local r = Plan.RouteIfReady(prof, other)
+    if not (r and spell) then return nil end
+    local step = r.steps[Plan.StepIndex(r, math.max(1, SW.Prof.Rank(prof)))]
+    if not step or step.spell == spell then return nil end
+    return step.spell
 end
 
 -- Which of several interchangeable recipes the player would rather make. Remembered per character and
@@ -599,7 +689,11 @@ function Plan.Current(prof)
             active = nil
         end
         local pick
-        if learnable then
+        -- An automatic substitution also lands in `active`, and that one must not outrank "go and
+        -- learn this". A recipe the PLAYER picked must: they asked for it, and the answer to a
+        -- request cannot be a different recipe.
+        local chosen = active and Plan.Preferred(prof, active.spell)
+        if learnable and not chosen then
             -- keep the route's step as the headline so the "go and learn this" panel fires; offer the
             -- best thing they can make meanwhile as a second line, never as the instruction
             pick = nil

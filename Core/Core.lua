@@ -227,9 +227,6 @@ local DEFAULTS = {
         autoReplaceEnchant = false, -- accept "replace enchant?" for enchants Skillwright started
         deepTrainerScan = true,  -- read a trainer's hidden services once per visit (the list blinks once)
         tooltipPrice = true,     -- one line on item tooltips: the auction price, and where it came from
-        -- Fastest: how much longer the player will take for lighter materials. 0 is purely the fewest
-        -- crafts; 0.25 gives something close to the published guides. Not a price - a tolerance.
-        craftTolerance = 0.10,
     },
     learnRanks = {},             -- [recipeSpellID] = skill needed, read off trainers
     trainerSeen = {},            -- [recipeSpellID] = true when a trainer offers it

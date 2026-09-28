@@ -159,6 +159,7 @@ end
 -- schematic reads) after every single craft - felt as lag while crafting.
 local done
 SW.Listen("PROFESSION_OPEN", function(prof)
+    if not SW.PROFESSIONS[prof] then return end    -- gathering: no recipes of ours to compare against
     if done == prof then return end
     done = prof
     SW.Debounce("drift", 1, function() D.Scan(prof) end)

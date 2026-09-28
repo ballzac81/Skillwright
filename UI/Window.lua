@@ -38,6 +38,14 @@ end
 local CAMP_QUEST_HINT = "taught by the quest \"Camping 101\" from a camping NPC (not the trainer) once your "
     .. "skill is 20."
 
+-- What "we think skill N" is worth, measured against the 45 trainer requirements this addon has
+-- recorded from the game itself, plus four First Aid ones cross-checked against wowhead: the only
+-- property we hold to is that it is never EARLY. See DECISIONS.md for what that cost and why.
+local GUESS_NOTE = "We only know the trainer's real number once you have stood in front of one. Until "
+    .. "then we go by when the recipe turns yellow, which in every requirement we have been able to "
+    .. "check is at or after the real one - so we would rather say later than send you to a trainer "
+    .. "who will not teach you. Open any trainer for this profession once and the plan turns exact."
+
 -- Why part of a bill has no price: before any auction prices it's a hint to scan; after a scan, the item
 -- simply wasn't listed (or Auctionator/TSM has no price for it).
 local function NoPriceNote()
@@ -134,31 +142,47 @@ local function BuildNow(f)
     sf:SetPoint("BOTTOMRIGHT", -22, 0)
     local c = sf.child
     f.sf, f.c = sf, c
+    -- The one handle anything outside this file has on the Now card. The offline harness had been
+    -- reaching for SkillwrightFrame.card, which never existed, so its card assertions were passing
+    -- without ever looking at a card.
+    if win then win.card = c end
 
     c.icon = U.IconButton(c, 40)
     c.icon:SetPoint("TOPLEFT", 4, -4)
     c.title = U.Text(c, "GameFontNormalLarge", "LEFT", true)
-    c.title:SetPoint("TOPLEFT", c.icon, "TOPRIGHT", 10, -1)
-    c.title:SetPoint("RIGHT", c, "RIGHT", -4, 0)
+    c.title:SetPoint("RIGHT", c, "RIGHT", -4, 0)   -- left edge depends on whether there is an icon
     c.sub = U.Text(c, "GameFontHighlight", "LEFT", true)
     c.sub:SetPoint("TOPLEFT", c.title, "BOTTOMLEFT", 0, -4)
     c.sub:SetPoint("RIGHT", c, "RIGHT", -4, 0)
 
     c.learn = U.Text(c, "GameFontHighlightSmall", "LEFT", true)
     c.why = U.Text(c, "GameFontHighlightSmall", "LEFT", true)   -- why this card differs from the route
-    c.tradeoff = U.Text(c, "GameFontHighlightSmall", "LEFT", true)  -- what the sure alternative would cost
     -- Recipes that are the same for the plan (Rough Sharpening Stone / Rough Weightstone): the player picks
     c.alts = CreateFrame("Button", nil, c)
-    c.alts:SetHeight(16)
+    c.alts:SetHeight(22)
+    c.alts.bg = c.alts:CreateTexture(nil, "BACKGROUND")
+    c.alts.bg:SetAllPoints()
+    c.alts.bg:SetColorTexture(1, 0.82, 0.3, 0.07)
+    c.alts.edge = c.alts:CreateTexture(nil, "BORDER")
+    c.alts.edge:SetPoint("TOPLEFT")
+    c.alts.edge:SetPoint("BOTTOMLEFT")
+    c.alts.edge:SetWidth(2)
+    c.alts.edge:SetColorTexture(1, 0.82, 0.3, 0.55)
+    c.alts.hl = c.alts:CreateTexture(nil, "HIGHLIGHT")
+    c.alts.hl:SetAllPoints()
+    c.alts.hl:SetColorTexture(1, 1, 1, 0.10)
     c.altsText = U.Text(c.alts, "GameFontHighlightSmall", "LEFT", true)
-    c.altsText:SetPoint("TOPLEFT", 0, 0)
-    c.altsText:SetPoint("RIGHT", c.alts, "RIGHT", 0, 0)
+    c.altsText:SetPoint("TOPLEFT", 8, -4)   -- width set where it is measured, never by anchors
+    c.altsChev = U.Text(c.alts, "GameFontNormalSmall", "RIGHT", false)
+    c.altsChev:SetPoint("TOPRIGHT", -7, -4)
+    c.altsChev:SetText("|cffffd100v|r")
     c.alts:SetScript("OnClick", function(self) AltMenu(self) end)
     c.alts:SetScript("OnEnter", function(self)
         GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:AddLine("Same for the plan", 1, 0.82, 0.3)
-        GameTooltip:AddLine("These give the same skill from the same kind of materials. Pick the one you "
-            .. "actually want; Skillwright remembers it for this profession.", 0.85, 0.85, 0.85, true)
+        GameTooltip:AddLine("Make something else", 1, 0.82, 0.3)
+        GameTooltip:AddLine("Click for every recipe that would raise this skill right now - what each "
+            .. "one costs, and how many you could make from what is already in your bags. Pick one and "
+            .. "Skillwright remembers it for this profession.", 0.85, 0.85, 0.85, true)
         GameTooltip:Show()
     end)
     c.alts:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -166,7 +190,7 @@ local function BuildNow(f)
     c.matsHead = U.Heading(c, "Materials for this step")
     c.mats = {}
     c.info = U.Text(c, "GameFontHighlightSmall", "LEFT", true)
-    c.trade = U.Text(c, "GameFontHighlightSmall", "LEFT", true)   -- what the other mode would cost
+    c.diverge = U.Text(c, "GameFontHighlightSmall", "LEFT", true)  -- only when the two modes disagree HERE
 
     c.craftBtn = U.Button(c, "Craft", 110, 24)
     c.craftBtn:SetScript("OnClick", CraftClick)
@@ -237,8 +261,7 @@ local function BuildNow(f)
     c.learnBox.edge:SetWidth(3)
     c.learnBox.edge:SetColorTexture(1, 0.5, 0.25, 0.9)
     c.learnBox.head = U.Text(c.learnBox, "GameFontNormalLarge", "LEFT", true)
-    c.learnBox.head:SetPoint("TOPLEFT", 10, -8)
-    c.learnBox.head:SetPoint("RIGHT", c.learnBox, "RIGHT", -8, 0)
+    c.learnBox.head:SetPoint("TOPLEFT", 10, -8)   -- width is set where it is measured, never by anchors
     c.learnBox.rows = {}
     for i = 1, 4 do
         local r = CreateFrame("Frame", nil, c.learnBox)
@@ -247,10 +270,20 @@ local function BuildNow(f)
         r.icon:SetPoint("TOPLEFT", 0, 0)
         r.text = U.Text(r, "GameFontHighlight", "LEFT", true)
         r.text:SetPoint("TOPLEFT", r.icon, "TOPRIGHT", 8, -2)
-        r.text:SetPoint("RIGHT", r, "RIGHT", 0, 0)
+        -- Only a guessed requirement has anything to say, and it has a lot: see GUESS_NOTE.
+        r:EnableMouse(true)
+        r:SetScript("OnEnter", function(self)
+            if not self.guess then return end
+            GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+            GameTooltip:AddLine("Our guess, not the trainer's number", 1, 0.82, 0.3)
+            GameTooltip:AddLine(GUESS_NOTE, 0.85, 0.85, 0.85, true)
+            GameTooltip:Show()
+        end)
+        r:SetScript("OnLeave", function() GameTooltip:Hide() end)
         r:Hide()
         c.learnBox.rows[i] = r
     end
+    c.learnBox.later = U.Text(c.learnBox, "GameFontHighlightSmall", "LEFT", true)
     c.learnBox.where = U.Text(c.learnBox, "GameFontHighlight", "LEFT", true)
     c.learnBox.mean = U.Text(c.learnBox, "GameFontHighlightSmall", "LEFT", true)
     c.learnBox.hint = U.Text(c.learnBox, "GameFontHighlightSmall", "LEFT", true)
@@ -259,12 +292,6 @@ local function BuildNow(f)
     c.trainBtn = U.Button(c, "Train", 120, 24)
     c.trainBtn:SetScript("OnClick", function(self) SW.Trainer.Train(self.list or {}) end)
 
-    c.nextHead = U.Heading(c, "Up next")
-    c.next = {}
-    c.gapHead = U.Heading(c, "Where trainer recipes run out")
-    c.gapText = U.Text(c, "GameFontHighlightSmall", "LEFT", true)
-    c.gap = {}
-    c.total = U.Text(c, "GameFontHighlightSmall", "LEFT", true)
 
 end
 
@@ -337,6 +364,15 @@ AltMenu = function(owner)
             local label = ("%s  |cff8a8a8a%s|r"):format(U.RecipeName(o.spell), table.concat(mats, " + "))
             if (o.canMake or 0) > 0 then
                 label = label .. ("  |cff40bf40you can make %d|r"):format(o.canMake)
+                -- and what those are worth, so "might as well use them up" has a number on it
+                for _, e in ipairs(Plan.Leftovers(prof) or {}) do
+                    if e.spell == o.spell then
+                        label = label .. (e.points >= 0.75
+                            and ("|cff8a8a8a, about %d skill|r"):format(math.floor(e.points + 0.5))
+                            or "|cff8a8a8a, probably no skill|r")
+                        break
+                    end
+                end
             end
             if (o.missing or 0) > 0 then
                 label = label .. ("  |cff8a8a8a%s to buy|r"):format(SW.MoneyShort(o.missing))
@@ -373,8 +409,12 @@ StepTooltip = function(step)
         for _, m in ipairs(step.mats or {}) do
             local n = m.count or m.per
             local left = n and (n .. " x " .. ItemText(m.id)) or ItemText(m.id)
-            local right = (n and m.unit) and Cost(n * m.unit, false) or ""
+            local price = m.full or m.unit                  -- what a shop charges, not what we ranked by
+            local right = (n and price) and Cost(n * price, false) or ""
             tt:AddDoubleLine(left, right, 1, 1, 1, 1, 1, 1)
+        end
+        if step.vendorOnly then
+            tt:AddLine("Every material comes from a vendor.", 0.4, 0.8, 0.4)
         end
         if step.source == "c" then
             tt:AddLine((CAMP_QUEST_HINT:gsub("^%l", string.upper)), 0.7, 0.7, 0.7, true)
@@ -392,6 +432,18 @@ local function RefreshNow(f)
     local width = f.sf:GetWidth()
     c:SetWidth(width)
     local y = -4
+    -- The alts line wraps, and a wrapped line only reports its real height once something has said
+    -- how wide it is. Placing and sizing it in one place keeps the three callers honest.
+    -- One place sizes and shows it, so the three callers cannot drift apart - and the text is
+    -- measured at the width it will really have, inside the panel and clear of the chevron.
+    local function showAlts(text)
+        c.altsText:SetText(text)
+        c.alts:SetWidth(width - 10)
+        c.altsText:SetWidth(width - 10 - 8 - 18)
+        c.alts:SetHeight(math.max(22, c.altsText:GetStringHeight() + 8))
+        c.alts:Show()
+    end
+
     local function place(widget, x, gap, h)
         widget:ClearAllPoints()
         widget:SetPoint("TOPLEFT", c, "TOPLEFT", x or 4, y - (gap or 0))
@@ -402,8 +454,22 @@ local function RefreshNow(f)
     end
 
     -- the recipe card is as tall as its (wrapping) title and subtitle, at least the icon
+    -- Where the title starts: beside the icon, or at the card's own margin when there is none.
+    -- Every branch that shows or hides the icon calls this, or it inherits the last render's anchor.
+    local function titleAt(hasIcon)
+        c.title:ClearAllPoints()
+        c.title:SetPoint("RIGHT", c, "RIGHT", -4, 0)
+        if hasIcon then
+            c.title:SetPoint("TOPLEFT", c.icon, "TOPRIGHT", 10, -1)
+        else
+            c.title:SetPoint("TOPLEFT", c, "TOPLEFT", 4, -5)
+        end
+    end
+
     local function headerY()
-        return -math.max(48, c.title:GetStringHeight() + c.sub:GetStringHeight() + 14)
+        -- no icon, no 48 pixels of icon to clear
+        local floor = c.icon:IsShown() and 48 or 20
+        return -math.max(floor, c.title:GetStringHeight() + c.sub:GetStringHeight() + 14)
     end
     -- lay action buttons out left to right, sized to their text, wrapping to a new row when full
     local bx, rowUsed = 4, false
@@ -423,15 +489,16 @@ local function RefreshNow(f)
 
     local cp = SW.CharProf(prof)
     local have = cp.has
-    for _, w in ipairs({ c.learn, c.why, c.tradeoff, c.alts, c.learnBox, c.trade, c.warn, c.matsHead, c.info, c.craftBtn, c.buyBtn, c.trainBtn, c.nextHead, c.gapHead, c.gapText, c.total,
+    for _, w in ipairs({ c.learn, c.why, c.alts, c.learnBox, c.diverge, c.warn, c.matsHead, c.info, c.craftBtn, c.buyBtn, c.trainBtn,
                          c.targetLabel, c.targetSlot, c.targetText, c.autoCB }) do
         w:Hide()
         if w.line then w.line:Hide() end
     end
-    HidePool(c.mats, 1); HidePool(c.next, 1); HidePool(c.gap, 1)
+    HidePool(c.mats, 1)
 
     if win.noGuideFor then
         c.icon:Hide()
+        titleAt(false)
         local plannable = {}
         for _, id in ipairs(SW.Prof.All()) do plannable[#plannable + 1] = SW.ProfName(id) end
         c.title:SetText(("Skillwright has no guide for %s"):format(SW.ProfName(win.noGuideFor)))
@@ -443,6 +510,7 @@ local function RefreshNow(f)
 
     if not cur then
         c.icon:Hide()
+        titleAt(false)
         local solving = Plan.Solving(prof)
         c.title:SetText(solving and "Working out your route..." or "No data for this profession")
         c.sub:SetText(solving and "|cff8a8a8aA moment - this only happens when the plan changes.|r" or "")
@@ -455,6 +523,7 @@ local function RefreshNow(f)
         c.icon:Set(nil, nil)
         c.icon.tex:SetTexture(SW.ProfIcon(prof))
         c.icon:Show()
+        titleAt(true)
         if route.gapAt then
             c.title:SetText("No trainer recipe left")
             c.sub:SetText(("Nothing you can learn raises %s past %d yet."):format(SW.ProfName(prof), route.gapAt))
@@ -468,16 +537,37 @@ local function RefreshNow(f)
         local tool = cur.tool
         -- What the card is about: a tool to make/buy first, or the step's recipe.
         local subject = tool or s
+        -- Needed up here as well as below: the header must not describe a recipe they cannot make yet
+        -- as though it were today's work.
+        local needsTraining = have and not cur.known and not (tool and tool.buy)
         if tool then
+            titleAt(true)
+            c.icon:Show()
             c.icon:Set(tool.item, tool.spell)
             c.title:SetText(("|cffffd100First:|r %s"):format(ItemText(tool.item)))
             c.sub:SetText(("%s one - |cffffffff%s|r needs it."):format(tool.buy and "Buy" or "Make", U.RecipeName(s.spell)))
         else
-            c.icon:Set(s.item, s.spell, StepTooltip(s))
-            c.title:SetText(U.Colored(cur.color, U.RecipeName(s.spell)) .. (s.qty > 1 and (" |cff8a8a8ax" .. s.qty .. "|r") or ""))
-            c.sub:SetText(("Make about |cffffffff%d|r more  |cff8a8a8a(skill %d to %d)|r"):format(cur.left, cur.rank, s.to))
+            -- The action is the headline. Naming the recipe here, in the place and colour the card
+            -- uses for "make this", read as "you have this" - and it kept the eye off the panel that
+            -- says what to actually do. The recipe is still named one line down, in a sentence, and
+            -- it has its own row with its own icon inside that panel.
+            if needsTraining then
+                c.icon:Hide()
+                titleAt(false)
+                c.title:SetText(("Go to a %s trainer"):format(SW.ProfName(prof)))
+                c.sub:SetText(("|cff8a8a8aThe next step is|r |cffffd100%s|r|cff8a8a8a, which you "
+                    .. "haven't learned. About|r |cffffffff%d|r |cff8a8a8aof them would take you from "
+                    .. "skill|r |cffffffff%d|r |cff8a8a8ato|r |cffffffff%d|r|cff8a8a8a.|r")
+                    :format(U.RecipeName(s.spell), cur.left, cur.rank, s.to))
+            else
+                c.icon:Set(s.item, s.spell, StepTooltip(s))
+                c.icon:Show()
+                titleAt(true)
+                c.title:SetText(U.Colored(cur.color, U.RecipeName(s.spell)) .. (s.qty > 1 and (" |cff8a8a8ax" .. s.qty .. "|r") or ""))
+                c.sub:SetText(("|cff8a8a8aAbout|r |cffffffff%d|r |cff8a8a8aof these takes you from skill|r "
+                    .. "|cffffffff%d|r |cff8a8a8ato|r |cffffffff%d|r"):format(cur.left, cur.rank, s.to))
+            end
         end
-        c.icon:Show()
         y = headerY()
 
         -- Learned? Where from?
@@ -497,18 +587,32 @@ local function RefreshNow(f)
             elseif subject.source and subject.source:match("^s:") then
                 learn = ("|cffff8040Not learned yet|r - a %s specialization recipe."):format(subject.source:sub(3))
             else
-                learn = ("|cffff8040Not learned yet|r - learn it at a trainer (needs skill %d%s)."):format(
-                    subject.learn or 1, subject.learnEstimated and ", estimated" or "")
+                learn = subject.learnEstimated
+                    and ("|cffff8040Not learned yet|r - a trainer teaches it. We think around skill %d; "
+                         .. "that is our own guess and it usually reads late."):format(subject.learn or 1)
+                    or ("|cffff8040Not learned yet|r - learn it at a trainer (needs skill %d)."):format(
+                        subject.learn or 1)
             end
         end
         -- Not learned yet: the whole point of the page is "go and learn it", so say it loudly.
-        local needsTraining = have and not cur.known and not (tool and tool.buy)
         if needsTraining then
             local box = c.learnBox
             local due = Plan.TrainingDue(prof)
             box.head:SetText(due and ("Train |cffffd100%s %s|r first"):format(due.name, SW.ProfName(prof))
                 or "Learn this at a trainer")
+            -- Width first, then measure - the same order place() uses, and the only one that reports a
+            -- wrapped line's real height. Getting it the other way round is what drew these lines on
+            -- top of each other.
+            local lineW = width - 8 - 18
+            box.head:SetWidth(lineW)
             local by = -8 - box.head:GetStringHeight() - 6
+            local function boxLine(fs, gap)
+                fs:ClearAllPoints()
+                fs:SetWidth(lineW)
+                fs:SetPoint("TOPLEFT", box, "TOPLEFT", 10, by - gap)
+                fs:Show()
+                by = by - gap - fs:GetStringHeight()
+            end
 
             -- this recipe, then the next few the route needs and the character doesn't know
             local list = { { spell = subject.spell, item = subject.item, learn = subject.learn,
@@ -522,26 +626,58 @@ local function RefreshNow(f)
                     end
                 end
             end
-            for i, r in ipairs(box.rows) do
-                local e = list[i]
-                if e then
-                    r.icon:Set(e.item, e.spell, nil)
-                    local svc = SW.Trainer.services[e.spell]
-                    local cost = SW.DB().trainerCost and SW.DB().trainerCost[e.spell]
-                    local src = SW.RecipeSource(e.spell)
-                    if src and src.kind == "vendor" then cost = cost or src.price end
-                    r.text:SetText(("%s  |cff8a8a8a(skill %d%s)|r%s%s"):format(U.RecipeName(e.spell), e.learn or 1,
-                        e.est and ", estimated" or "", cost and ("  |cff8a8a8a" .. SW.MoneyShort(cost) .. "|r") or "",
-                        (svc and svc.type == "available") and "  |cff40bf40this trainer has it|r" or ""))
-                    r:ClearAllPoints()
-                    r:SetPoint("TOPLEFT", box, "TOPLEFT", 10, by)
-                    r:SetPoint("RIGHT", box, "RIGHT", -8, 0)
-                    r:Show()
-                    by = by - 22
+            -- The header reads as an instruction for THIS trip, so the list under it must only mean
+            -- that. The player walked to Ironforge with four of these and could learn one: every
+            -- number was right and nothing said which of them were for later.
+            local rank = cur.rank or 0
+            local now, later = {}, {}
+            for _, e in ipairs(list) do
+                local svc = SW.Trainer.services[e.spell]
+                -- the trainer standing in front of us beats any number we hold
+                if (svc and svc.type == "available") or (e.learn or 1) <= rank then
+                    now[#now + 1] = e
                 else
-                    r:Hide()
+                    later[#later + 1] = e
                 end
             end
+            local i = 0
+            local function draw(e, dim)
+                i = i + 1
+                local r = box.rows[i]
+                if not r then return end
+                r.icon:Set(e.item, e.spell, nil)
+                r.guess = e.est
+                local svc = SW.Trainer.services[e.spell]
+                local cost = SW.DB().trainerCost and SW.DB().trainerCost[e.spell]
+                local src = SW.RecipeSource(e.spell)
+                if src and src.kind == "vendor" then cost = cost or src.price end
+                -- A guessed number is not the game's number, and ours is 20 skill late as often as
+                -- not - so it is never printed the way a recorded one is.
+                local req = e.est and ("|cff8a8a8a(we think skill %d)|r"):format(e.learn or 1)
+                    or ("|cff8a8a8a(skill %d)|r"):format(e.learn or 1)
+                r.text:SetText(("%s%s|r  %s%s%s"):format(dim and "|cff8a8a8a" or "", U.RecipeName(e.spell), req,
+                    cost and ("  |cff8a8a8a" .. SW.MoneyShort(cost) .. "|r") or "",
+                    (svc and svc.type == "available") and "  |cff40bf40this trainer has it|r" or ""))
+                r.text:SetWidth(lineW - 28)                 -- measure what will actually be drawn
+                local h = math.max(22, r.text:GetStringHeight() + 4)
+                r:SetHeight(h)
+                r:ClearAllPoints()
+                r:SetPoint("TOPLEFT", box, "TOPLEFT", 10, by)
+                r:SetPoint("RIGHT", box, "RIGHT", -8, 0)
+                r:Show()
+                by = by - h
+            end
+            for _, e in ipairs(now) do draw(e, false) end
+            if #later > 0 and i < #box.rows then
+                box.later:SetText(#now > 0 and "|cff8a8a8aNot yet - come back for these:|r"
+                    or "|cff8a8a8aNothing here yet. These come later:|r")
+                boxLine(box.later, 2)
+                by = by - 4
+                for _, e in ipairs(later) do draw(e, true) end
+            else
+                box.later:Hide()
+            end
+            for j = i + 1, #box.rows do box.rows[j]:Hide() end
 
             -- where: what we have seen ourselves first, Classic knowledge last, nothing invented
             -- A recipe we have seen on sale beats everything: it names the shop and the town.
@@ -560,18 +696,11 @@ local function RefreshNow(f)
                 box.where:SetText("|cffffd100Where:|r |cff8a8a8ayou haven't met a "
                     .. SW.ProfName(prof) .. " trainer yet - ask a guard in a capital city.|r")
             end
-            box.where:ClearAllPoints()
-            box.where:SetPoint("TOPLEFT", box, "TOPLEFT", 10, by - 6)
-            box.where:SetPoint("RIGHT", box, "RIGHT", -8, 0)
-            by = by - 6 - box.where:GetStringHeight()
+            boxLine(box.where, 6)
 
             if where and not seen then
                 box.hint:SetText("|cff8a8a8a" .. where .. "|r")
-                box.hint:ClearAllPoints()
-                box.hint:SetPoint("TOPLEFT", box, "TOPLEFT", 10, by - 4)
-                box.hint:SetPoint("RIGHT", box, "RIGHT", -8, 0)
-                box.hint:Show()
-                by = by - 4 - box.hint:GetStringHeight()
+                boxLine(box.hint, 4)
             else
                 box.hint:Hide()
             end
@@ -588,11 +717,7 @@ local function RefreshNow(f)
                 end
                 box.mean:SetText(("|cff8a8a8aMeanwhile you could make|r |cffffd100%s|r|cff8a8a8a: about %d "
                     .. "crafts%s.|r"):format(U.RecipeName(mw.spell), mw.crafts or 0, extra))
-                box.mean:ClearAllPoints()
-                box.mean:SetPoint("TOPLEFT", box, "TOPLEFT", 10, by - 6)
-                box.mean:SetPoint("RIGHT", box, "RIGHT", -8, 0)
-                box.mean:Show()
-                by = by - 6 - box.mean:GetStringHeight()
+                boxLine(box.mean, 6)
             else
                 box.mean:Hide()
             end
@@ -620,8 +745,9 @@ local function RefreshNow(f)
             elseif b.source == "r" then
                 how = "you need to find the recipe"
             else
-                how = ("a trainer teaches it from skill %d%s"):format(b.learn or 1,
-                    b.learnEstimated and ", estimated" or "")
+                how = b.learnEstimated
+                    and ("a trainer teaches it - we think around skill %d, which is a guess"):format(b.learn or 1)
+                    or ("a trainer teaches it from skill %d"):format(b.learn or 1)
             end
             -- Two different situations, two different sentences. When they can walk in and learn it, the
             -- card gives an instruction and the numbers that make it obviously right; when they cannot,
@@ -649,16 +775,6 @@ local function RefreshNow(f)
             place(c.why, 4, 6)
         end
 
-        -- A step that is not a sure skill-up looks like a bad step until you see what the sure one
-        -- costs. Same skill points, both numbers already worked out - only the sentence was missing.
-        local sure, extra = Plan.YellowTradeOff(cur)
-        if sure and extra then
-            c.tradeoff:SetText(("|cff8a8a8aNot a sure skill-up, on purpose:|r |cffffd100%s|r |cff8a8a8ais, "
-                .. "and would cost about|r |cffffd100%s|r |cff8a8a8amore for the same skill.|r")
-                :format(U.RecipeName(sure.spell), SW.MoneyShort(extra)))
-            place(c.tradeoff, 4, 6)
-        end
-
         -- Several recipes are guaranteed skill-ups right now: name the runner-up and let them choose
         local orange = cur.orange
         if orange and #orange > 1 then
@@ -676,13 +792,11 @@ local function RefreshNow(f)
                 elseif (other.missing or 0) > 0 then
                     bits[#bits + 1] = ("%s to buy"):format(SW.MoneyShort(other.missing))
                 end
-                c.altsText:SetText(("|cff8a8a8aor|r |cffffd100%s|r |cff8a8a8a- %s%s|r%s")
+                showAlts(("|cff8a8a8aMake instead:|r |cffffd100%s|r |cff8a8a8a- %s%s|r%s")
                     :format(U.RecipeName(other.spell), table.concat(bits, ", "),
                         #orange > 2 and (", +%d more"):format(#orange - 2) or "",
                         (cur.swapped or (mine and mine.chosen)) and "  |cff40bf40(your choice)|r" or ""))
-                c.alts:Show()
-                place(c.alts, 4, 2)
-                c.alts:SetHeight(math.max(14, c.altsText:GetStringHeight()))
+                place(c.alts, 4, 4)
             end
         elseif s.alts and #s.alts > 0 then
             local a = s.alts[1]
@@ -690,12 +804,15 @@ local function RefreshNow(f)
             local tail = extra > 0 and (", %s more each"):format(SW.MoneyShort(extra))
                 or (extra < 0 and (", %s less each"):format(SW.MoneyShort(-extra)) or ", same cost")
             local more = #s.alts > 1 and (" |cff8a8a8a(+%d more)|r"):format(#s.alts - 1) or ""
-            c.altsText:SetText(("|cff8a8a8aor|r |cffffd100%s|r |cff8a8a8a- same skill-ups%s|r%s%s")
+            showAlts(("|cff8a8a8aMake instead:|r |cffffd100%s|r |cff8a8a8a- same skill-ups%s|r%s%s")
                 :format(U.RecipeName(a.spell), tail, more,
                     s.chosenByPlayer and "  |cff40bf40(your choice)|r" or ""))
-            c.alts:Show()
-            place(c.alts, 4, 2)
-            c.alts:SetHeight(math.max(14, c.altsText:GetStringHeight()))
+            place(c.alts, 4, 4)
+        elseif (#(cur.orange or {}) > 0) or #(Plan.Leftovers(prof, s.spell) or {}) > 0 then
+            -- nothing worth naming, but there IS something else you could make: say so plainly, so the
+            -- menu is reachable instead of hidden behind a sentence that had no reason to appear
+            showAlts("|cff8a8a8aMake something else instead|r")
+            place(c.alts, 4, 4)
         else
             c.alts:Hide()
         end
@@ -739,12 +856,13 @@ local function RefreshNow(f)
                 tt:AddLine(" ")
                 tt:AddDoubleLine("Have / need", ("%d / %d"):format(m.have, m.need), 1, 0.82, 0.3, 1, 1, 1)
                 if m.bank > 0 then tt:AddLine(("%d of those are in your bank."):format(m.bank), 0.5, 0.65, 1) end
-                tt:AddDoubleLine("Price each", m.unit and Cost(m.unit, false) or "|cff8a8a8ano price|r",
+                local each = m.full or m.unit
+                tt:AddDoubleLine("Price each", each and Cost(each, false) or "|cff8a8a8ano price|r",
                     0.7, 0.7, 0.7, 1, 1, 1)
             end)
             cell.count:SetText(("%s%d|r/%d"):format(m.have >= m.need and "|cff40bf40" or "|cffff6060", m.have, m.need))
             cell:Show()
-            if m.short > 0 then SW.Prices.AddToBuy(vendorBuy, m.id, m.short, m.unit) end
+            if m.short > 0 then SW.Prices.AddToBuy(vendorBuy, m.id, m.short, m.full or m.unit) end
             if m.bank > 0 then bankLines[#bankLines + 1] = ("%d %s"):format(m.bank, ItemText(m.id)) end
             if NoPrice(m.priceSource) then partial = true end
         end
@@ -757,45 +875,47 @@ local function RefreshNow(f)
         if tool then
             info[#info + 1] = tool.cost and ("It costs about %s. You only need one."):format(SW.MoneyShort(tool.cost))
                 or "You only need one."
+        elseif cur.enough then
+            info[#info + 1] = "|cff40bf40You already have the materials for this.|r"
         else
-            -- The honest number is what is still missing; the full cost of the step is the second half,
-            -- because materials already in the bags are not spent again.
-            -- What comes back when the products are sold: the solver counts it, so the page has to
-            -- say it, or a step of dear materials looks like a mistake.
+            -- ONE money line. What you still have to lay out, and what it really costs you once the
+            -- products are sold - the second number is the one that decides anything, and on its own
+            -- line it read as a separate bill.
             local back = Plan.Resale(s, cur.left)
-            local unpricedNote = " |cff8a8a8a(only the materials we have a price for)|r"
-            if not cur.enough and (cur.missingCost or 0) > 0 then
-                info[#info + 1] = ("Still to buy: %s%s."):format(Cost(cur.missingCost, partial),
-                    partial and unpricedNote or "")
+            local out = (cur.missingCost or 0) > 0 and cur.missingCost or (Plan.StepCost(s) * cur.left)
+            local line = ("Still to buy: %s%s"):format(Cost(out, partial),
+                partial and " |cff8a8a8a(only what we can price)|r" or "")
+            if back and back > 0 and out and out > 0 then
+                local net = out - back
+                line = line .. (net > 0
+                    and ("|cff8a8a8a - about|r %s |cff8a8a8aafter you sell them.|r"):format(SW.MoneyShort(net))
+                    or ("|cff40bf40 - it pays for itself.|r"))
             else
-                info[#info + 1] = ("This step costs %s%s."):format(
-                    Cost(Plan.StepCost(s) * cur.left, partial), partial and unpricedNote or "")
+                line = line .. "."
             end
-            if back and back > 0 then
-                info[#info + 1] = ("|cff8a8a8aSelling what you make back to a vendor returns about %s of that.|r")
-                    :format(SW.MoneyShort(back))
-            end
-            -- Only say "from a vendor" when we actually know a vendor price for every material: a guess
-            -- from an item's sell price is not a vendor, and saying so sends people shopping for ore.
-            -- only when they really do have enough for the whole step, counted from the same numbers
-            -- the materials row shows
-            if cur.enough then
-                info[#info + 1] = "|cff40bf40You already have the materials for this.|r"
-            elseif s.vendorOnly and AllFromVendor(cur.mats) then
-                info[#info + 1] = "|cff40bf40Every material comes from a vendor.|r"
+            info[#info + 1] = line
+        end
+        -- ONE blocker line, and only when something is actually in the way. Being short of gold is not
+        -- the end of the step: the money comes back as you sell, so the way through is part of the same
+        -- sentence rather than a line of its own.
+        if not tool then
+            local short, purse = Plan.Shortfall(cur)
+            local canNow = cur.craftable or 0
+            if short then
+                info[#info + 1] = ("|cffff6060You have %s - all of it at once needs %s more.|r%s"):format(
+                    SW.MoneyShort(purse), SW.MoneyShort(short),
+                    canNow > 0 and ("|cff8a8a8a Make %d, sell, buy the rest.|r"):format(canNow) or "")
+            elseif canNow <= 0 and cur.known then
+                local missing = {}
+                for _, m in ipairs(cur.mats) do
+                    if m.short > 0 then missing[#missing + 1] = ("%d more %s"):format(m.short, ItemText(m.id)) end
+                end
+                if #missing > 0 then
+                    info[#info + 1] = ("|cffff8040You need %s|r |cff8a8a8a- the Shopping tab has the rest.|r")
+                        :format(table.concat(missing, ", "))
+                end
             end
         end
-        if (cur.craftable or 0) <= 0 and cur.known and not (tool and tool.buy) then
-            local short = {}
-            for _, m in ipairs(cur.mats) do
-                if m.short > 0 then short[#short + 1] = ("%d more %s"):format(m.short, ItemText(m.id)) end
-            end
-            if #short > 0 then
-                info[#info + 1] = ("|cffff8040You need %s|r |cff8a8a8a- the Shopping tab has the rest.|r")
-                    :format(table.concat(short, ", "))
-            end
-        end
-        if #bankLines > 0 then info[#info + 1] = "|cff7da5ffIn your bank:|r " .. table.concat(bankLines, ", ") end
         c.info:SetText(table.concat(info, "\n"))
         place(c.info, 4, 4)
 
@@ -856,70 +976,30 @@ local function RefreshNow(f)
         -- What stops the route, then what comes next: both are about the road ahead, not this craft.
         if capText then place(c.warn, 4, 12) end
 
-        -- Up next
-        local shown = 0
-        for i = cur.idx + 1, math.min(#route.steps, cur.idx + 4) do
-            if shown == 0 then
-                place(c.nextHead, 4, 12, 14)
-                c.nextHead.line:Show()
-                y = y - 4
-            end
-            shown = shown + 1
-            local st = route.steps[i]
-            local r = LineRow(c, c.next, shown)
-            r.icon:SetTexture(U.RecipeIcon(st.item, st.spell))
-            r.text:SetText(("|cffffd100%d-%d|r  %s %s"):format(st.from, st.to, U.RecipeName(st.spell), SourceTag(st.source)))
-            r.right:SetText(("x%d"):format(st.crafts or 0))
-            r.tipItem, r.tipSpell, r.tipExtra = st.item, st.spell, StepTooltip(st)
-            r:ClearAllPoints()
-            r:SetPoint("TOPLEFT", c, "TOPLEFT", 4, y)
-            r:SetPoint("RIGHT", c, "RIGHT", -4, 0)
-            r:Show()
-            y = y - 21
-        end
+        -- "Up next" used to be here: the first four rows of the Route tab, printed a second time
+        -- on the page whose job is the NEXT thing to do. The tab is one click away and shows all of
+        -- them, grouped, with the trainer visits in place.
     end
 
-    -- Where the plan stops: recipes that would carry it further
-    if route.gapAt and route.gapOptions then
-        place(c.gapHead, 4, 12, 14)
-        c.gapHead.line:Show()
-        c.gapText:SetText(("Trainer recipes stop giving skill at |cffffd100%d|r. Most of Forever's new recipes come "
-            .. "from recipe items whose drops and vendors aren't known yet, so the plan can only use them once you've "
-            .. "learned them. Any of these would keep you going:"):format(route.gapAt))
-        place(c.gapText, 4, 4)
-        y = y - 4
-        for i, g in ipairs(route.gapOptions) do
-            local r = LineRow(c, c.gap, i)
-            r.icon:SetTexture(U.RecipeIcon(g.item, g.spell))
-            r.text:SetText(("%s %s"):format(U.RecipeName(g.spell), SourceTag(g.source)))
-            r.right:SetText(("|cffff8040%d|r |cffffff00%d|r |cff808080%d|r"):format(g.learn, g.yellow, g.grey))
-            r.tipItem = (g.recipeItem and g.recipeItem > 0) and g.recipeItem or g.item
-            r.tipSpell, r.tipExtra = g.spell, nil
-            r:ClearAllPoints()
-            r:SetPoint("TOPLEFT", c, "TOPLEFT", 4, y)
-            r:SetPoint("RIGHT", c, "RIGHT", -4, 0)
-            r:Show()
-            y = y - 21
-        end
+    -- Three more blocks used to sit here and they have all moved to the Route tab, where the route
+    -- lives: where trainer recipes run out (a list about skill 285, on the page of someone standing
+    -- at 97 - and the Route tab's own note already pointed here for it), what the rest of the route
+    -- costs, and what the other mode would cost. None of them answers "what do I do next".
+
+    -- The one place the two modes visibly disagree is on the step in front of you, and there the
+    -- player is not asking how we weigh materials - they are asking which one to believe. So the line
+    -- appears there and nowhere else: never a standing footnote about how the modes work.
+    local otherSpell = Plan.Divergence(prof, s and s.spell)
+    if otherSpell then
+        local fastName = SW.Settings().mode == "fast" and U.RecipeName(s.spell) or U.RecipeName(otherSpell)
+        local cheapName = SW.Settings().mode == "fast" and U.RecipeName(otherSpell) or U.RecipeName(s.spell)
+        c.diverge:SetText(("|cff8a8a8aFastest says|r %s|cff8a8a8a, Cheapest says|r %s|cff8a8a8a - they "
+            .. "disagree because Fastest weighs materials by what a vendor pays and Cheapest by what the "
+            .. "auction actually charges. With a scan this fresh, Cheapest has the better numbers.|r")
+            :format(fastName, cheapName))
+        place(c.diverge, 4, 4)
     end
 
-    local crafts, cost = Plan.Remaining(prof)
-    if crafts > 0 then
-        c.total:SetText(("|cff8a8a8aRest of the route: about|r %d crafts |cff8a8a8aand|r %s|cff8a8a8a, skill %d to %d.|r"):format(
-            crafts, SW.MoneyShort(cost), math.max(1, cur.rank), route.to))
-        place(c.total, 4, 14)
-    end
-
-    -- What the other mode would cost, so the choice is a decision and not a coin flip.
-    local trade = Plan.TradeOff(prof)
-    if trade then
-        c.trade:SetText(("|cff8a8a8aYou are on|r |cffffd100%s|r|cff8a8a8a.|r %s"):format(
-            SW.Settings().mode == "fast" and "Fastest" or "Cheapest", trade))
-        place(c.trade, 4, 4)
-    elseif Plan.Solving(prof, SW.Settings().mode == "fast" and "cheap" or "fast") then
-        c.trade:SetText("|cff8a8a8aWorking out what the other route would cost...|r")
-        place(c.trade, 4, 4)
-    end
     c:SetHeight(-y + 10)
 end
 
@@ -977,11 +1057,12 @@ local function RefreshRoute(f)
             r.range:SetText(("|cffffd100%d|r"):format(b.at))
             local hint = b.name and SW.TrainerHint and SW.TrainerHint(prof, b.name)
             r.text:SetText(("|cffffd100Train %s %s|r%s"):format(b.name or "the next rank", SW.ProfName(prof),
-                hint and ("  |cff8a8a8a" .. hint .. "|r") or ""))
+                hint and "  |cff8a8a8a(where?)|r" or ""))
             r.right:SetText(b.need and ("|cff8a8a8aneeds skill %d|r"):format(b.need) or "")
             r.tipItem, r.tipSpell, r.tipExtra = nil, nil, function(tt)
                 tt:AddLine(("Train %s %s"):format(b.name or "the next rank", SW.ProfName(prof)), 1, 0.82, 0.3)
                 tt:AddLine(("Your skill stops at %d until you do."):format(b.at), 0.85, 0.85, 0.85, true)
+                if hint then tt:AddLine(hint, 0.6, 0.8, 1, true) end
                 if not b.name then
                     tt:AddLine("WoW: Forever adds a rank above Artisan. The client data does not say what "
                         .. "it is called or how far it goes, so Skillwright will not guess - it plans as "
@@ -1051,18 +1132,57 @@ local function RefreshRoute(f)
         and ("Planned to |cffffd100%d|r: a character here has reached that, past the 300 the game data stops at.")
             :format(ceiling)
         or "Planned to |cffffd100300|r, the highest skill any recipe in this build needs."
+    local reach, total, purse = Plan.GoldReach(prof)
+    if reach and total and purse and reach < route.to then
+        notes[#notes + 1] = ("The rest costs about |cffffd100%s|r and you have |cffffd100%s|r: enough to "
+            .. "reach about |cffffd100%d|r."):format(SW.MoneyShort(total), SW.MoneyShort(purse), reach)
+    end
     if route.pricedTo and route.pricedTo > route.from and route.pricedTo < route.to then
         notes[#notes + 1] = ("Planned on price up to |cffffd100%d|r. Nothing above that has a price, so "
             .. "from there it is the shortest route."):format(route.pricedTo)
     end
     if route.gapAt then
-        notes[#notes + 1] = ("The route ends at |cffffd100%d|r: no trainer recipe gives skill past that. See Now for recipes that would."):format(route.gapAt)
+        notes[#notes + 1] = ("The route ends at |cffffd100%d|r: no trainer recipe gives skill past "
+            .. "that. Most of Forever's new recipes come from recipe items whose drops and vendors "
+            .. "aren't known yet, so the plan can only use one once you have learned it. Any of "
+            .. "these would keep you going:"):format(route.gapAt)
+    end
+    -- What the rest of it comes to, and what the other button would cost: both about the ROUTE,
+    -- and both used to sit on the Now card, whose job is the next thing to do.
+    local restCrafts, restCost = Plan.Remaining(prof)
+    if restCrafts > 0 then
+        notes[#notes + 1] = ("The rest is about |cffffd100%d|r crafts and |cffffd100%s|r, skill %d to %d.")
+            :format(restCrafts, SW.MoneyShort(restCost), rank, route.to)
+    end
+    local trade = Plan.TradeOff(prof)
+    if trade then
+        notes[#notes + 1] = ("You are on |cffffd100%s|r. %s"):format(
+            SW.Settings().mode == "fast" and "Fastest" or "Cheapest", trade)
     end
     f.note:SetText(table.concat(notes, "\n"))
     f.note:ClearAllPoints()
     f.note:SetPoint("TOPLEFT", c, "TOPLEFT", 4, y - 8)
     f.note:SetWidth(c:GetWidth() - 10)
-    c:SetHeight(-y + 16 + f.note:GetStringHeight())
+    y = y - 8 - f.note:GetStringHeight()
+
+    -- and the recipes that would carry it past the end, drawn like the route above them
+    for _, g in ipairs((route.gapAt and route.gapOptions) or {}) do
+        n = n + 1
+        local r = RouteRow(f, n)
+        r.bg:Hide()
+        r.icon:SetTexture(U.RecipeIcon(g.item, g.spell))
+        r.range:SetText(("|cffff8040%d|r"):format(g.learn))
+        r.text:SetText(("%s %s"):format(U.RecipeName(g.spell), SourceTag(g.source)))
+        r.right:SetText(("|cffffff00%d|r |cff808080%d|r"):format(g.yellow, g.grey))
+        r.tipItem = (g.recipeItem and g.recipeItem > 0) and g.recipeItem or g.item
+        r.tipSpell, r.tipExtra = g.spell, nil
+        r:ClearAllPoints()
+        r:SetPoint("TOPLEFT", c, "TOPLEFT", 4, y - 4)
+        r:SetPoint("RIGHT", c, "RIGHT", -4, 0)
+        r:Show()
+        y = y - 4 - ROW
+    end
+    c:SetHeight(-y + 16)
 end
 
 -- ---------------------------------------------------------------------------
@@ -1255,7 +1375,7 @@ local function RefreshMini()
         else
             m.icon:Set(s.item, s.spell, StepTooltip(s))
             m.title:SetText(U.Colored(cur.color, U.RecipeName(s.spell)))
-            m.sub:SetText(("%d more  |cff8a8a8a%d > %d|r%s"):format(cur.left, cur.rank, s.to,
+            m.sub:SetText(("%d to go  |cff8a8a8a%d > %d|r%s"):format(cur.left, cur.rank, s.to,
                 cur.known and "" or "  |cffff8040not learned|r"))
         end
         -- materials under the (wrapping) title, the enchant target at the right; rows of icons as needed
@@ -1457,9 +1577,33 @@ local function Refresh()
     -- materials for sale.
     local unpriced = win.prof and Plan.PricesUnknown(win.prof)
     local scanWouldHelp = SW.Prices.Status() == "none" or SW.Prices.Status() == "stale"
+    local reach, reachKnown = nil, true
+    if win.prof then reach, reachKnown = Plan.CheapReach(win.prof) end
+    -- Only worth solving the other route to label a button when the label would otherwise be bad news:
+    -- if the page is not about to call Cheapest unavailable, there is nothing to check.
+    -- ...but not while the page is still being drawn. This is a second full solve, and asking for
+    -- it at the moment the window opens is a noticeable stall for a button label. It can wait.
+    if unpriced and not reachKnown then
+        local prof = win.prof
+        SW.Debounce("cheapLabel", 1.5, function()
+            if win and win:IsShown() and win.prof == prof and not Plan.Solving(prof) then
+                Plan.Route(prof, "cheap")
+            end
+        end)
+    end
     for _, b in ipairs(win.mode.buttons or {}) do
         if b.value == "cheap" then
-            if not unpriced then
+            if not reachKnown then
+                -- no cheap route yet, so no claim: never call a mode unavailable on a guess
+                b.fs:SetText("Cheapest")
+                b.altTooltip = nil
+            elseif reach then
+                -- it works, and it says how far: "No prices" over a route that really was costed to
+                -- 150 is how a player ends up on the dearer plan believing it is the only one.
+                b.fs:SetText("Cheapest")
+                b.altTooltip = ("Planned on price up to %d. Above that nothing on the route has a price, "
+                    .. "so from there it takes the shortest way."):format(reach)
+            elseif not unpriced then
                 b.fs:SetText("Cheapest")
                 b.altTooltip = nil
             elseif scanWouldHelp then
@@ -1635,8 +1779,12 @@ local function Build()
         { value = "cheap", label = "Cheapest", tooltip = "The least gold per skill point, from market prices." },
         { value = "fast", label = "Fastest", tooltip = "The fewest crafts per skill point (orange and yellow recipes first)." },
     }, 136, function(v, btn)
-        -- "Cheapest" without prices is a promise we cannot keep: offer the scan instead of a fake route
-        if v == "cheap" and win.prof and Plan.PricesUnknown(win.prof) then
+        -- "Cheapest" with nothing to rank is a promise we cannot keep: offer the scan instead of a fake
+        -- route. But only when the CHEAP route really cannot be costed - not when the fast one on screen
+        -- happens to mention an unpriced material at skill 280.
+        local reach, reachKnown = nil, true
+        if v == "cheap" and win.prof then reach, reachKnown = Plan.CheapReach(win.prof) end
+        if v == "cheap" and win.prof and reachKnown and not reach then
             if SW.Prices.CanScan() then
                 SW.Prices.StartScan()
             else

@@ -32,21 +32,84 @@ local F_SPELL, F_ITEM, F_QTY, F_LEARN, F_YELLOW, F_GREY, F_UPS, F_SRC, F_STATION
 -- grinds a nearly-grey one instead. Measured on a real scan, moving to `yellow` turned a 159-craft
 -- route into a 254-craft one, including 44 crafts of a recipe four points from grey.
 -- Ten points early, self-corrected the moment they open a trainer, beats thirty points late.
+-- How far below yellow a trainer teaches a recipe. A flat 10 was a guess that read 20 skill LATE
+-- more often than not; the width of the recipe's own orange band is not a guess at all. Scored against
+-- the 45 requirements this addon has recorded from real trainers, `yellow - (grey - yellow)` is exact
+-- 31 times with a mean error of 5, where the flat 10 was exact 0 times with a mean error of 21. The
+-- same rule over the 1629 recipes whose requirement IS in the client data - a population it was never
+-- derived from - is exact 788 times, mean error 8. See DECISIONS.md. LEARN_GAP survives for recipes
+-- with no usable grey, and the fallback stays the escape hatch for when nothing else is learnable.
+-- WHEN A TRAINER TEACHES A RECIPE, before we have met that trainer. The game carries no such number
+-- for trainer recipes, so this is ours: yellow minus the recipe's own orange band, capped at 40.
+--
+-- This was settled three times in one day, and the trail is worth keeping because the two obvious
+-- answers are wrong in opposite directions. What we can check is 49 EXACT requirements (45 read off
+-- Blacksmithing trainers by this addon, 4 from wowhead's Forever First Aid tables) and 91 UPPER
+-- BOUNDS - a recipe that a Forever beta levelling guide has you making at rank N must be learnable
+-- at or below N - across all seven crafting professions:
+--
+--     rule              exact     mean error   EARLY             provably LATE
+--     yellow              12/49        25.1     none              64 of 91, by up to 54
+--     yellow - 10          0/49        20.4     14, up to 10      38 of 91
+--     band, capped 40     31/49         7.3     15, up to 40       2 of 91
+--
+-- `yellow` is the only rule that is never early, and for half a day it was what we shipped. The 91
+-- bounds are what settled it: it holds a recipe back in 64 of 91 steps a real player was making, by
+-- up to 54 skill, which makes the plan worse for everyone who has not yet opened a trainer.
+--
+-- The band rule's early cases have one shape: every recipe it gets early is one whose requirement is
+-- EXACTLY yellow. A requirement is either yellow or roughly yellow-30, and nothing in the data
+-- separates the two populations - not band width, not profession. So there is no rule here that is
+-- both accurate and never early, only a choice of which way to be wrong.
+--
+-- We choose accuracy, because being early no longer costs what it did: an unlearned recipe is charged
+-- UNLEARNED_MARKUP, and GUESSED_MARKUP when the requirement is a guess, so the route will not send
+-- anyone walking for a small gain, and the card never states a guess as a fact. 40 is the widest band
+-- the exact measurements cover; past that we stop extrapolating. LEARN_GAP is the escape hatch below
+-- it, for a rank where nothing else can raise skill at all.
+--
+-- All of it evaporates on the first trainer visit, which records the real number for every recipe
+-- that trainer lists, and the game's own GetTrainerServiceSkillReq always wins.
+local LEARN_BAND_MAX = 40
 local LEARN_GAP = 10
 local LEARN_GAP_FALLBACK = 30    -- the escape hatch: only where the safe estimate leaves no recipe at all,
                                  -- and always flagged to the player as an estimate
 local YIELD_EVERY = 20        -- ranks between breaks when solving in the background
 local SWITCH_PENALTY = 3         -- switching recipe costs as much as ~3 skill points (fewer, longer steps)
--- Fastest never looks at a price. Where it used to add "20g of materials counts as one extra craft",
--- it now trades crafts for material WEIGHT (Solver.StaticWeight, vendor sell value of the raw materials)
--- and only within a tolerance the player sets: fewest crafts decides, and among routes within that much
--- of the fewest, the lightest one wins. A tolerance has no exchange rate to invent and cannot run away.
--- The ladder is the set of trade rates tried; the one that buys the most lightness inside the tolerance
--- is the route we keep. Geometric, because what matters is the order of magnitude, not the exact rate.
-local FAST_WEIGHT_LADDER = { 0, 1 / 8000, 1 / 2000, 1 / 500, 1 / 125 }
+-- What a recipe you have not learned has to beat a recipe you have BY, before we send you to a
+-- trainer. Charging nothing for the trip let nine crafts of something unlearned beat ten crafts of
+-- something in the spellbook - and the player had not even met that trainer. A margin, not a ban: a
+-- recipe that genuinely halves the work still wins, and for a character who knows nothing yet every
+-- candidate carries the same markup, so it changes no route there.
+local UNLEARNED_MARKUP = 0.15    -- a trip to a trainer
+local GUESSED_MARKUP = 0.40      -- ...and we are only GUESSING you can learn it yet
+-- FASTEST COUNTS CRAFTS. Nothing else. It weighs no materials, reads no prices, and asks nothing
+-- about the player's gold: the standing assumption, hardcoded and not computed, is that whatever a
+-- step needs can be bought at the auction house or farmed. Higher-tier materials cost more - that is
+-- simply true and needs no arithmetic here. Cheapest is the mode that spends the player's money, and
+-- it is the one that asks what things cost.
+--
+-- What this replaced: a weighting by VENDOR SELL VALUE, which does not mean what it looks like. No
+-- vendor sells an Iron Bar, so its sell price says nothing about getting one. It also produced a
+-- Truesilver Skeleton Key step - 26 bars at 500 each ranked "lighter" than 372 Iron Bars at 150 -
+-- which no player would agree with, next to a Blacksmithing guide that puts iron there.
+--
+-- Recipes that are interchangeable for the plan (same skill to learn, same yellow, same grey, same
+-- skill-ups, same tools and station) still need ONE of them picked, and that choice is made in the
+-- grouping below. That is a choice between recipes of the same tier doing the same job, not a
+-- judgement about the route.
 -- "Prefer vendor materials": materials you have to farm or buy at auction count this many times their price,
 -- and in fast mode each craft that needs them counts as this many extra crafts.
 local VENDOR_BIAS = 2.5
+
+-- Below this chance a recipe stops being something you make and becomes something you throw materials
+-- at. With real prices, a nearly-grey recipe with cheap reagents wins on gold per skill point every
+-- time - 34 crafts of a 7.5% Rough Grinding Stone for two points was the cheapest thing on a real
+-- player's route - and no guide should recommend that. So the plan does not use one, unless a rank has
+-- nothing else at all: the floor is the first of three passes, and the others catch what it excludes.
+-- A judgement, not a measurement. The skill-up recording will say whether a quarter is the right line;
+-- until then it is set where "one in four" stops feeling like crafting.
+local CHANCE_FLOOR = 0.25
 -- A material with no vendor price and no auction price has no price here either: nothing is guessed from
 -- its sell price. A route that needs one cannot be costed, so "cheapest" has nothing to compare and the
 -- guide shows the shortest route instead until the player scans.
@@ -81,9 +144,16 @@ function Solver.LearnRank(r, opts, fallback)
     local spell = r[F_SPELL]
     local known = opts.learnRanks and opts.learnRanks[spell]
     if known then return known, false end
+    -- You cannot need to learn what you already know. Without this a recipe in the player's own
+    -- spellbook could be locked out of the route by our ESTIMATE of when a trainer teaches it.
+    if opts.known and opts.known[spell] then return 1, false end
     if r[F_LEARN] > 0 then return r[F_LEARN], false end
     if r[F_SRC] == "a" then return 1, false end
-    return max(1, r[F_YELLOW] - (fallback and LEARN_GAP_FALLBACK or LEARN_GAP)), true
+    local yellow, grey = r[F_YELLOW], r[F_GREY] or 0
+    local guess = grey > yellow and (yellow - min(grey - yellow, LEARN_BAND_MAX)) or (yellow - LEARN_GAP)
+    -- the escape hatch has to go LOWER than the ordinary guess, whichever way the band falls
+    if fallback then guess = min(guess, yellow - LEARN_GAP_FALLBACK) end
+    return max(1, guess), true
 end
 
 -- Recipes only one faction can learn (the data lists both as trainer recipes).
@@ -433,10 +503,14 @@ function Solver.Solve(prof, opts)
             local grey = (seen and seen.grey) or r[F_GREY]
             -- only guard numbers we learned in game: the datamined pairs may legitimately be equal
             if seen and grey <= yellow then grey = yellow + 1 end
+            local _, learnIsGuess = Solver.LearnRank(r, opts, false)
+            local unlearned = not (opts.known and opts.known[r[F_SPELL]])
+            local markup = unlearned and (learnIsGuess and GUESSED_MARKUP or UNLEARNED_MARKUP) or 0
             local staticWeight, kinds = Solver.StaticWeight(r)
             local c = { r = r, cost = cost, vendorOnly = vendorOnly, weight = weighted, haveMats = haveAll,
                         unpriced = unpriced, staticWeight = staticWeight, kinds = kinds,
                         learn = learn, learnFB = learnFB, first = learn < learnFB and learn or learnFB,
+                        markup = markup,
                         yellow = yellow, grey = grey, ups = max(1, r[F_UPS]) }
             cands[#cands + 1] = c
             bySpell[r[F_SPELL]] = c
@@ -521,28 +595,6 @@ function Solver.Solve(prof, opts)
     end
     if pricesUnknown then fast = true end
 
-    -- Fastest with a tolerance: solve for fewest crafts, then see how much lighter the materials can
-    -- get without going more than `tolerance` over that. The ladder is tried from the boldest trade
-    -- down, so the first route inside the tolerance is the lightest one we can have.
-    if fast and not opts.noTolerance and (opts.tolerance or 0) > 0 then
-        local base = Solver.Solve(prof, setmetatable({ noTolerance = true, weightPer = 0 },
-            { __index = opts }))
-        if not base then return nil end
-        local allowed = base.crafts * (1 + opts.tolerance)
-        for i = #FAST_WEIGHT_LADDER, 1, -1 do
-            local rate = FAST_WEIGHT_LADDER[i]
-            if rate > 0 then
-                local try = Solver.Solve(prof, setmetatable({ noTolerance = true, weightPer = rate },
-                    { __index = opts }))
-                if try and try.crafts <= allowed and (try.weight or 0) < (base.weight or 0) then
-                    try.tradedCrafts = try.crafts - base.crafts
-                    return try
-                end
-            end
-        end
-        return base
-    end
-
 
     -- lowest skill needed first, so the loop can stop where the rest are still out of reach
     table.sort(cands, function(a, b)
@@ -569,23 +621,25 @@ function Solver.Solve(prof, opts)
     end
 
     -- per-attempt cost of recipe c at rank `rank`, or nil when it can't give a skill-up there
-    local function stepCost(c, rank, fallback)
+    local function stepCost(c, rank, fallback, floorOn)
         if rank >= c.grey then return nil end                 -- grey: no skill from it
         if (fallback and c.learnFB or c.learn) > rank then return nil end
         local r = c.r
         local p = Solver.Chance(c.yellow, c.grey, rank)
         if p <= 0 then return nil end
+        -- unless they asked for this one: the floor decides what we RECOMMEND, never what a
+        -- player is allowed to make. A choice outranks our judgement about the odds.
+        if floorOn and p < CHANCE_FLOOR and not c.chosenByPlayer then return nil end
         if not toolsOK(r, rank) then return nil end
         if fast then
-            -- one craft, plus whatever weight the caller is willing to trade crafts for
-            local heavy = (opts.weightPer or 0) * (c.staticWeight or 0)
-            return (1 + heavy) / p
+            -- one craft. The markup is not a material cost - it is what a trip to a trainer is worth.
+            return (1 + (c.markup or 0)) / p
         end
         -- Ranking by gold, and this one has no gold figure: it can never be the cheapest answer, because
         -- we do not know what it costs. Not a guess at its price - a refusal to rank it against real ones.
         -- The range is chosen so this cannot normally happen (see priceHorizon); this is the floor under it.
         if not c.weight then return huge end
-        return c.weight / p
+        return c.weight * (1 + (c.markup or 0)) / p
     end
 
     -- f[rank][ci] = cost of reaching `to` from `rank` crafting cands[ci] now
@@ -624,11 +678,12 @@ function Solver.Solve(prof, opts)
         while last > 0 and cands[last].first > rank do last = last - 1 end
         local row, b, bs = {}, huge, huge
         local usedFallback = false
-        for pass = 1, 2 do
-            local fallback = pass == 2
+        for pass = 1, 3 do
+            local fallback = pass == 3
+            local floorOn = pass == 1
             for ci = 1, last do
                 local c = cands[ci]
-                local sc = stepCost(c, rank, fallback)
+                local sc = stepCost(c, rank, fallback, floorOn)
                 if sc then
                     local cap = nextBreak[rank]
                     local nxt = min(rank + c.ups, cap or to, to)

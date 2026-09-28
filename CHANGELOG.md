@@ -1,5 +1,129 @@
 # Skillwright for WoW: Forever
 
+## Unreleased
+
+### The Now tab
+
+- **The Now tab is about now again.** It had grown a second Route tab inside it: the next four
+  steps, a list of recipes for skill 285 while you stand at 97, the total for the whole route, and
+  what the other mode would cost. All of that is on the Route tab, where the route lives, and the
+  card is back to what to make, what it needs, what it costs and what is in your way.
+
+### The route
+
+- **The plan now runs the whole way to 300**, with the trainer visits in it as steps of their own -
+  Journeyman at 75, Expert at 150, Artisan at 225. Before, it stopped at whatever your current rank
+  cap was, so a smith at 81 saw two steps and a footnote. When the next thing to do is walk to a
+  trainer, that is the step.
+- **Fastest counts crafts. Nothing else.** It used to weigh materials by what a vendor pays for
+  them, and had a setting letting it take 10% or 25% longer to save them. Both are gone. The vendor
+  price was never the right number - no vendor sells an Iron Bar - and it was putting a Truesilver
+  Skeleton Key in the Blacksmithing route where every guide puts iron. Fastest now assumes what it
+  always should have: that you can buy or farm what a step needs. **Cheapest is the mode that
+  spends your gold, and it is the one that asks what things cost.**
+- **A recipe you have not learned no longer wins by a hair.** Going to a trainer cost the plan
+  nothing at all, so at First Aid 87 it asked for nine Simple Poultice - not learned, from a trainer
+  that character had never met - instead of ten Wool Bandage, which they could make where they stood.
+  An unlearned recipe now has to be meaningfully better before the plan sends you walking, and more so
+  when we are only guessing you can learn it yet. A recipe that genuinely halves the work still wins.
+- **Steps with almost no chance of a skill-up are gone.** A recipe with under a 25% chance is no longer
+  planned unless you pick it yourself. On one real Blacksmithing route that cut 175 crafts to 88.
+- **Cheapest plans as far as the prices reach**, and says where that is, instead of quietly mixing
+  priced and unpriced stretches.
+- **Cheapest needs auction prices, and now says so.** Without them it was only ever producing the
+  shortest route under a different name. If you were on Cheapest, had never scanned and have no
+  Auctionator or TSM, Skillwright has moved you to Fastest - the same plan you were already getting,
+  under the name that describes it - and says in chat how to switch back. If you have scanned, your
+  choice is untouched.
+- **When Fastest and Cheapest would make different things right here**, the card says so and says which
+  to believe: they disagree because Fastest weighs materials by what a vendor pays and Cheapest by what
+  the auction actually charges. Only on a step where they really differ - never as a standing note.
+
+### Learning recipes
+
+- **The "learn this at a trainer" list is split** into what you can learn right now and what is for
+  later. It listed four recipes at skill 95 when only one could be learned, with nothing to tell them
+  apart.
+- **A much better guess at when a trainer teaches a recipe.** The game does not carry that number
+  for trainer recipes, so Skillwright works it out from the recipe's own skill range. Checked
+  against 49 real requirements it is exactly right 31 times, against none for the old rule. It can
+  still be early, so a recipe you have not learned has to beat one you have by a clear margin before
+  the plan sends you walking - and **one visit to any trainer replaces every guess for that
+  profession with the game's own number.**
+- A guessed requirement is never shown as if it were the game's number - it says "we think", and hovering
+  it explains what the guess is worth.
+- A recipe you already know is never held back by a guess about learning it.
+- Asking for a different recipe now wins over "go and learn this one".
+- The route tab marks unlearned steps: `*` not learned yet, `*?` not learned and the skill it needs is
+  our estimate.
+
+### Money and materials
+
+- **Materials you already own are no longer priced at a tenth on screen.** That was an internal weighting
+  meant to make the planner prefer what is in your bags, and it was leaking onto the card, the tooltip
+  and the shopping list - a stack of 64 Bronze Bars was quoted at 15s when the auction wanted 2s 51c
+  each. What the planner pays and what you pay are separate numbers now.
+- **"You already have the materials for this"** was coming from that same internal flag and was shown
+  against 103 of 1450 bars. It is counted honestly now, and the card says "Still to buy" at shop prices.
+- **The card says what a step really costs**: what you still have to buy, and what that comes to once
+  you sell what you make. When you cannot afford it all at once, it says how short you are and that you
+  can make what you can, sell, and buy the rest.
+- **Item tooltips show the auction price** and where it came from - "(Auctionator)" or "(your scan, 4h
+  ago)". A scan too old to plan with still shows the number, greyed out and labelled. No price, no line.
+- **Auction prices are the cheapest 15% by quantity**, so a couple of listings planted far below or far
+  above the market cannot move them.
+- **Disenchanting shows what you actually got**, not a table we invented: which items fall in the same
+  group is exact client data, what comes out of a group is not, so Skillwright counts your own results
+  and says how many it has seen. No Enchanting means no line at all.
+
+### Fixes
+
+- **Opening Mining, Herbalism or Fishing now gets the guide out of the way.** It used to sit there
+  showing the last crafting profession's route beside a window it has nothing to do with. If the
+  guide opened itself alongside a profession window it now closes with one it cannot plan; if you
+  opened it yourself it stays, and says so.
+- **Opening a profession, or switching between two, took seconds before the right guide appeared.**
+  The scan was scheduled 0.05s after the window opened - and then every update as the recipe list
+  filled in cancelled it and scheduled it a full second later instead, again and again. The fast
+  path had been measured and written months ago and never once ran.
+
+- **Lines in the "learn this at a trainer" panel were drawn on top of each other.** Anything that
+  wrapped to more than one line - the "where" line, the book hint, the "meanwhile you could make"
+  suggestion - was measured as a single line, so the next line landed in the middle of it. The same
+  fault sized the "make something else instead" line, which now wraps too.
+- **When the next thing to do is walk to a trainer, that is what the card says.** It used to lead with
+  the recipe's name and icon, in the same place it uses for "make this", above a panel telling you to
+  go and learn it - so it read as though you already had it. The headline is now the trainer, and the
+  recipe is named in the sentence under it.
+- **"Make something else" is a button you can see.** It was a line of text that happened to open a
+  menu, which nobody would ever have guessed. It has a panel, a highlight and a chevron now, and it
+  always starts with what it does.
+- **"Make about 9 more" is gone.** Nothing counts your crafts - that number is how far the skill has to
+  go - so it fell while you made something else entirely, and a player making Wool Bandage watched the
+  Simple Poultice counter tick down. It now says what it is: "About 9 of these takes you from skill 87
+  to 95."
+- The Shopping tab threw an error as soon as one material had no price, which was every route since we
+  stopped guessing prices.
+- A crash on the Cooking route when the step you were following had just been swapped for another
+  recipe - and that swapped card could describe the recipe it replaced: wrong source, wrong tools,
+  wrong trainer requirement.
+- The "no prices" strip stayed on screen after a scan with the page drawn over it, and the Cheapest
+  button complained about scanning even after you had scanned.
+- Switching profession took up to 1.3 seconds before the guide knew which profession it was looking at,
+  and could show the previous one's plan in the meantime, including its "go and learn this" panel.
+- The route no longer plans a skill-up across a rank cap, and no longer plans past the last recipe that
+  exists in this build.
+- Training rows that were cut off now show the full text on hover.
+
+### Data
+
+- **Recipe data regenerated for build 1.60.1.70009** (it was two builds behind). Four tailoring recipes
+  no longer need Fine Thread - Cloudy and Azure Gustwoven Trousers and Windraveled Pants - so the guide
+  had been sending people to buy a reagent the recipe stopped using. New 300-330 recipes from recipe
+  items, and Green and Red Winter Clothes give a different number of skill-ups.
+- Nothing is said about lost settings on build 70009, where the client bug that caused them is fixed.
+- Pinned to the shared YippYapp library v1.0.6.
+
 ## 0.1.0-beta8
 
 - Updated shared YippYapp library.

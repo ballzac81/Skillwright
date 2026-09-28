@@ -78,29 +78,9 @@ function Page.Build(f)
 
     -- Fastest trades crafts for lighter materials, but only this far. Said as what it is: how much
     -- longer you are willing to take. No exchange rate between gold and time - just a ceiling.
-    local tolRow = CreateFrame("Frame", nil, p)
-    tolRow:SetHeight(24)
-    place(tolRow, 4, 8, true)
-    local tolLabel = U.Text(tolRow, "GameFontHighlight")
-    tolLabel:SetPoint("LEFT", 0, 0)
-    tolLabel:SetText("Fastest may take")
-    f.tolerance = U.Segmented(tolRow, {
-        { value = 0, label = "no longer",
-          tooltip = "The fewest crafts, whatever the materials are." },
-        { value = 0.10, label = "10% longer",
-          tooltip = "Among routes within 10% of the fewest crafts, the one with the lightest materials." },
-        { value = 0.25, label = "25% longer",
-          tooltip = "Lighter materials still, at up to a quarter more crafts." },
-    }, 260, function(v)
-        if SW.Settings().craftTolerance == v then return end
-        SW.Settings().craftTolerance = v
-        Plan.Invalidate()
-        SW.Fire("PLAN_CHANGED")
-    end)
-    f.tolerance:SetPoint("LEFT", 110, 0)
-    text("Materials are weighed by what a vendor pays for them, with bars resolved back to the ore they "
-        .. "are smelted from. No auction prices: the Fastest route is the same for everyone.",
-        nil, 4, 4)
+    text("|cffffd100Fastest|r is the fewest crafts, and never more than that. Where several routes "
+        .. "need the same number, it takes the one whose materials are easier to come by. It reads no "
+        .. "prices at all, so the Fastest route is the same for everyone.", nil, 4, 4)
     checkbox("Prefer materials from vendors", "preferVendor",
         "Recipes whose materials you can simply buy come first, even if that means a few more crafts.",
         function() Plan.Invalidate() end)
@@ -183,7 +163,6 @@ local function FitHeight(f)
 end
 
 function Page.Refresh(f, prof)
-    if f.tolerance then f.tolerance:Select(SW.Settings().craftTolerance or 0) end
     for _, cb in ipairs(f.checks) do cb:SetChecked(SW.Settings()[cb.key] and true or false) end
     f.mode:Select(SW.Settings().mode)
 
