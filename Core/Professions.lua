@@ -41,8 +41,23 @@ function P.ScanRanks()
                     p.has, p.rank, p.max = true, s.rank, s.maxRank or 0
                     changed = true
                 end
+                -- The canary for the day 300 stops being the end (SW.Ceiling). Account-wide and only
+                -- upwards: one character at Journeyman must not lower what another has shown us.
+                local caps = SW.DB().caps
+                if (s.maxRank or 0) > (caps[id] or 0) then
+                    caps[id] = s.maxRank
+                    if s.maxRank > SW.MAX_RANK and not SW.DB().capNoticed then
+                        SW.DB().capNoticed = true
+                        SW.msg("|cffffd100%s goes to %d here|r - higher than the 300 every recipe in the "
+                            .. "game data stops at. Skillwright will plan that far.", SW.ProfName(id), s.maxRank)
+                    end
+                end
             elseif p.has then
-                p.has, p.rank = nil, 0      -- forgotten (unlearned at a trainer)
+                -- Forgotten at a trainer. `known` MUST be cleared here, together with has and rank:
+                -- P.Knows falls back to this table when the client says no, so a leftover entry would
+                -- claim they still know recipes they have to train all over again if they take the
+                -- profession back up - and the guide would skip those steps.
+                p.has, p.rank, p.known = nil, 0, {}
                 changed = true
             end
         end
@@ -138,7 +153,12 @@ local open = nil
 local windowOpen = false     -- between TRADE_SKILL_SHOW and TRADE_SKILL_CLOSE
 local pendingOpen = false    -- the window opened and the guide hasn't been told yet
 local retries = 0
-local MAX_RETRIES = 10       -- x 0.5 s: the data can come a moment after TRADE_SKILL_SHOW
+local MAX_RETRIES = 12
+-- How long to wait before each read. The client usually has the profession ready within a frame or two,
+-- so the first tries are quick and only a stubborn window falls back to half a second; the old fixed
+-- 0.5 s made every profession swap feel slow even when the data was there immediately.
+local WAITS = { 0.05, 0.1, 0.15, 0.25, 0.4 }
+local function WaitFor(n) return WAITS[n] or 0.5 end
 
 local function ReadOpen()
     if not ViewingOwnProfession() then return nil end
@@ -172,11 +192,19 @@ ScanOpen = function()
         -- not ready yet: try again shortly while the opening is still unannounced
         if pendingOpen and retries < MAX_RETRIES then
             retries = retries + 1
-            SW.Debounce("scanTrade", 0.5, ScanOpen)
+            SW.Debounce("scanTrade", WaitFor(retries), ScanOpen)
         end
         return
     end
-    if not SW.PROFESSIONS[id] then pendingOpen = false return end   -- a gathering profession
+    if not SW.PROFESSIONS[id] then
+        -- A gathering profession: nothing to plan, but the guide still has to KNOW, or it sits there
+        -- showing another profession's route beside a window it has nothing to do with. Announced the
+        -- same way as any other, so whoever is listening decides what that means for them.
+        local was = pendingOpen
+        pendingOpen = false
+        if was or (before and id ~= before) then SW.Fire("PROFESSION_OPEN", id) end
+        return
+    end
     RememberName(id, (info.parentProfessionName and info.parentProfessionName ~= "") and info.parentProfessionName or info.professionName)
     local p = SW.CharProf(id)
     local level, maxLevel = info.skillLevel, info.maxSkillLevel
@@ -213,20 +241,45 @@ function P.IsOpen(id)
     return current ~= nil and current == id
 end
 
--- Learned right now? Live when that profession's window is open, else the last scan.
+-- Learned right now? Three answers, best first: the open profession window, then the client's own
+-- IsPlayerSpell (which works with no window open in Forever), then the last scan. The scan alone is not
+-- enough: it goes stale the moment the player trains a recipe, and then the guide tells them to learn
+-- something they already own - which is exactly what happened with a Mining window in front.
 function P.Knows(id, spell)
     if P.IsOpen(id) then
         local ri = C_TradeSkillUI.GetRecipeInfo(spell)
-        return ri and ri.learned or false
+        if ri ~= nil then return ri.learned or false end
+    end
+    if IsPlayerSpell and IsPlayerSpell(spell) then
+        local p = SW.CharProf(id)
+        p.known = p.known or {}
+        p.known[spell] = true            -- remember it, so the next question is a table lookup
+        return true
     end
     return SW.CharProf(id).known[spell] or false
 end
 
 SW.On("TRADE_SKILL_SHOW", function()
     windowOpen, pendingOpen, retries = true, true, 0
-    SW.Debounce("scanTrade", 0.3, ScanOpen)
+    open = nil                                   -- a new window: what we knew is about the old one
+    SW.Debounce("scanTrade", 0.05, ScanOpen)     -- the guide should follow the window, not trail it
 end)
-SW.On("TRADE_SKILL_LIST_UPDATE", function() if windowOpen then SW.Debounce("scanTrade", 1, ScanOpen) end end)
+SW.On("TRADE_SKILL_LIST_UPDATE", function()
+    if not windowOpen then return end
+    -- Only a switch invalidates what we know; a rescan of the same window (a craft, a new recipe)
+    -- must not throw it away, or every craft would blink the guide.
+    local now = ReadOpen()
+    if open and (not now or now.id ~= open.id) then
+        open = nil
+        pendingOpen, retries = true, 0            -- a different profession: the guide has to catch up
+    end
+    -- THE SLOW PROFESSION SWITCH. Debounce CANCELS the pending timer and starts a new one, so a flat
+    -- one second here threw away the 0.05 s retry that TRADE_SKILL_SHOW had just scheduled - and this
+    -- event fires again and again while the list fills, each time pushing the scan another second
+    -- into the future. The fast ladder was measured and put in place months ago and never once ran.
+    -- While the guide has not caught up with this window, this event is part of the OPENING.
+    SW.Debounce("scanTrade", pendingOpen and 0.05 or 1, ScanOpen)
+end)
 SW.On("NEW_RECIPE_LEARNED", function()
     if windowOpen then SW.Debounce("scanTrade", 1, ScanOpen) else SW.Debounce("scanKnown", 1, P.ScanKnownSpells) end
 end)

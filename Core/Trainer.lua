@@ -27,6 +27,8 @@ local function Index()
     end
 end
 
+-- Where the trainers are: what we see in game, kept account-wide, so every character is told where the
+-- last one was found. The client data has no trainer locations at all, hence remembering our own.
 function T.Remember(prof)
     if not prof then return end
     local who = UnitName("npc")
@@ -50,6 +52,8 @@ function T.Remember(prof)
     SW.Fire("TRAINER_PLACES")
 end
 
+-- One line about where to find a trainer for this profession, and whether it is something we saw
+-- ourselves (true) or Classic knowledge that may be wrong in Forever (false).
 function T.WhereIs(prof, tier)
     local seen = SW.DB().trainers and SW.DB().trainers[prof]
     if seen and seen.who then
@@ -68,6 +72,11 @@ local function LinkItem(i)
     return link and tonumber(link:match("item:(%d+)"))
 end
 
+-- Name and kind of a trainer service. The kind is found by VALUE, not by position: we read the third slot
+-- for two releases, which in this client is the texture, so "header" never matched and nothing was ever
+-- "available" - the Train button simply never appeared, and nothing failed loudly enough to notice.
+-- Taking whichever field actually says one of the four kinds cannot make that mistake, and if Blizzard
+-- moves the fields again it comes back nil (visible) instead of a texture (silently wrong).
 -- Forever returns (name, type, texture, reqLevel, subText). Found by ballzac81.
 local KINDS = { available = true, unavailable = true, used = true, header = true }
 local function ServiceInfo(i)
@@ -79,14 +88,18 @@ local function ServiceInfo(i)
     return a, kind
 end
 
+-- The trainer window hides services by default ("available" only), and the hidden ones are exactly the
+-- interesting ones: a recipe the character can't train yet still states the skill it needs. So every
+-- filter is turned on for the read and the player's own filters are put back straight after.
 local FILTERS = { "available", "unavailable", "used" }
-local saved
-local busy
-local deepDone
+local saved       -- the player's own filters while we have ours on
+local busy        -- true while WE are changing filters: every event in that window is ours, so ignore it
+local deepDone    -- the one deep read of this trainer window has been done
 
--- ClassTrainerFrame is reused for profession AND pet/class/riding trainers.
--- Replacing ClassTrainerFrame_Update taints that shared frame, so the default
--- Train button dies with ADDON_ACTION_FORBIDDEN on BuyTrainerService.
+-- ClassTrainerFrame is reused for profession trainers AND pet/class/riding trainers.
+-- Replacing ClassTrainerFrame_Update taints that shared frame, so the default Train
+-- button dies with ADDON_ACTION_FORBIDDEN on BuyTrainerService — including pet training.
+-- Do not wrap or replace any Blizzard trainer function.
 local function HoldRedraw() end
 local function ReleaseRedraw() end
 
@@ -94,6 +107,9 @@ local function IsProfessionTrainer()
     return IsTradeskillTrainer and IsTradeskillTrainer() and true or false
 end
 
+-- Turning a filter on rebuilds the list and fires TRAINER_UPDATE. Reacting to that event would set the
+-- filters again, and the list would flicker for as long as the window is open (seen in beta4). So the
+-- deep read happens once per trainer window and every event it causes is ignored.
 local function OpenAllFilters()
     if not (GetTrainerServiceTypeFilter and SetTrainerServiceTypeFilter) then return false end
     local mine, changed = {}, false
@@ -102,7 +118,7 @@ local function OpenAllFilters()
         mine[f] = on
         if not on then changed = true end
     end
-    if not changed then return false end
+    if not changed then return false end       -- everything is already visible: nothing to do, no blink
     saved = mine
     busy = true
     HoldRedraw()
@@ -123,15 +139,20 @@ local function RestoreFilters()
     for _, f in ipairs(FILTERS) do
         if not mine[f] then SetTrainerServiceTypeFilter(f, false) end
     end
+    -- the events from putting them back arrive next frame: stay deaf until they have passed
     C_Timer.After(0, function()
         busy = false
         ReleaseRedraw()
     end)
 end
 
-T.services = {}
-T.prof = nil
 
+T.services = {}     -- [spell] = { index, type } for the open trainer
+T.prof = nil        -- profession of the open trainer
+
+-- Match every service to a recipe. Recipe names aren't unique (two "Faction Banner"s, two "Dark Leather
+-- Boots"), so the item a service makes decides first - within the trainer's own profession - and the
+-- name is only used for services that make no item.
 local function Read()
     wipe(T.services)
     T.prof = nil
@@ -139,6 +160,7 @@ local function Read()
     local db = SW.DB()
     local n = GetNumTrainerServices() or 0
 
+    -- 1. which profession is this trainer for? The one most of its item links belong to.
     local profCount = {}
     for i = 1, n do
         local _, kind = ServiceInfo(i)
@@ -148,6 +170,7 @@ local function Read()
     local prof, bestN = nil, 0
     for p, c in pairs(profCount) do if c > bestN then prof, bestN = p, c end end
     if not prof then
+        -- an enchanting trainer's services make no items: fall back to names
         local nameCount = {}
         for i = 1, n do
             local name, kind = ServiceInfo(i)
@@ -162,6 +185,7 @@ local function Read()
     T.prof = prof
     T.Remember(prof)
 
+    -- 2. each service -> its recipe in that profession
     local learned = 0
     for i = 1, (prof and n or 0) do
         local name, kind = ServiceInfo(i)
@@ -178,6 +202,8 @@ local function Read()
                 local _, rank = GetTrainerServiceSkillReq(i)
                 local cost = GetTrainerServiceCost and GetTrainerServiceCost(i)
                 if rank and rank > 0 and db.learnRanks[spell] ~= rank then
+                    -- How far our estimate was from the game's own number: a measure of how much Forever
+                    -- moved away from what the recipe data implies.
                     local row = rowOf[spell]
                     if row and (row[4] or 0) == 0 then
                         local guess = math.max(1, (row[5] or 1) - 10)
@@ -195,6 +221,7 @@ local function Read()
                     db.trainerCost = db.trainerCost or {}
                     db.trainerCost[spell] = cost
                 end
+                -- Abilities it asks for beyond the profession itself = a specialization.
                 local cp = SW.CharProf(prof)
                 for j = 1, GetTrainerServiceNumAbilityReq(i) or 0 do
                     local ability, has = GetTrainerServiceAbilityReq(i, j)
@@ -215,6 +242,7 @@ local function Read()
     SW.Fire("TRAINER_CHANGED")
 end
 
+-- Services at the open trainer that the current route uses and can be learned now.
 function T.RouteServices(prof, route)
     local list = {}
     if not route or T.prof ~= prof then return list end
@@ -245,13 +273,15 @@ function T.Train(list)
     end)
 end
 
+-- Read what the player's own filters show. Once per trainer window, and only if they asked for it,
+-- also read the hidden services: filters on, read, filters back, done - one blink, never a loop.
 local function Scan()
     if busy then return end
     if not IsProfessionTrainer() then return end
     Read()
     if deepDone or SW.Settings().deepTrainerScan == false then return end
     deepDone = true
-    if not OpenAllFilters() then return end
+    if not OpenAllFilters() then return end       -- already all visible: the read above was the deep one
     C_Timer.After(0.05, function()
         Read()
         RestoreFilters()
@@ -265,7 +295,7 @@ SW.On("TRAINER_SHOW", function()
     SW.Debounce("trainer", 0.2, Scan)
 end)
 SW.On("TRAINER_UPDATE", function()
-    if busy then return end
+    if busy then return end                        -- our own filter change: not a reason to scan again
     if not IsProfessionTrainer() then return end
     SW.Debounce("trainer", 0.3, Scan)
 end)
