@@ -11,25 +11,117 @@ local F_SPELL, F_ITEM, F_QTY, F_LEARN, F_YELLOW, F_GREY, F_UPS, F_SRC, F_STATION
 
 -- Trainers don't publish the skill a recipe needs to learn; this estimate is replaced by the real value as
 -- soon as the player opens a trainer (SkillwrightDB.learnRanks). Conservative on purpose: planning a recipe
--- slightly late costs little, planning it before it can be learned breaks the route.
+-- slightly late costs little, planning it before it can be learned puts a step in the route that cannot
+-- be done at all.
+--
+-- The gap is measured, and the measurement is worth keeping because the obvious calibration is wrong.
+--
+-- Of the 2163 recipes we ship, the 1621 that carry a real learn rank are ALL recipe items ("r"). Not one
+-- trainer recipe has one - 394 of 394 are blank, which is why the estimate exists at all. So calibrating
+-- against "every recipe whose requirement we know" measures drop and vendor recipes and applies the
+-- answer to trainer recipes: a different population, and usable() only plans an "r" once the player
+-- already knows it, where this estimate is never consulted.
+--
+-- Against 45 REAL trainer observations (learn ranks this account has read off trainers), yellow sits
+-- this far above the true learn rank: nine at +0, two at +5, then a long cluster at +30 and +40, max +55.
+--     yellow - 10   too early for 11 of 45, never by more than 10 points; too late by 30 (median)
+--     yellow - 5    too early for  9 of 45, never by more than  5 points; too late by 30
+--     yellow        too early for  0 of 45;                               too late by 30, up to 55
+-- Being late is not free: a trainer recipe is learned while it is still orange and stays orange for
+-- another 30-40 points, so estimating `yellow` holds a recipe back for that whole band and the route
+-- grinds a nearly-grey one instead. Measured on a real scan, moving to `yellow` turned a 159-craft
+-- route into a 254-craft one, including 44 crafts of a recipe four points from grey.
+-- Ten points early, self-corrected the moment they open a trainer, beats thirty points late.
+-- How far below yellow a trainer teaches a recipe. A flat 10 was a guess that read 20 skill LATE
+-- more often than not; the width of the recipe's own orange band is not a guess at all. Scored against
+-- the 45 requirements this addon has recorded from real trainers, `yellow - (grey - yellow)` is exact
+-- 31 times with a mean error of 5, where the flat 10 was exact 0 times with a mean error of 21. The
+-- same rule over the 1629 recipes whose requirement IS in the client data - a population it was never
+-- derived from - is exact 788 times, mean error 8. See DECISIONS.md. LEARN_GAP survives for recipes
+-- with no usable grey, and the fallback stays the escape hatch for when nothing else is learnable.
+-- WHEN A TRAINER TEACHES A RECIPE, before we have met that trainer. The game carries no such number
+-- for trainer recipes, so this is ours: yellow minus the recipe's own orange band, capped at 40.
+--
+-- This was settled three times in one day, and the trail is worth keeping because the two obvious
+-- answers are wrong in opposite directions. What we can check is 49 EXACT requirements (45 read off
+-- Blacksmithing trainers by this addon, 4 from wowhead's Forever First Aid tables) and 91 UPPER
+-- BOUNDS - a recipe that a Forever beta levelling guide has you making at rank N must be learnable
+-- at or below N - across all seven crafting professions:
+--
+--     rule              exact     mean error   EARLY             provably LATE
+--     yellow              12/49        25.1     none              64 of 91, by up to 54
+--     yellow - 10          0/49        20.4     14, up to 10      38 of 91
+--     band, capped 40     31/49         7.3     15, up to 40       2 of 91
+--
+-- `yellow` is the only rule that is never early, and for half a day it was what we shipped. The 91
+-- bounds are what settled it: it holds a recipe back in 64 of 91 steps a real player was making, by
+-- up to 54 skill, which makes the plan worse for everyone who has not yet opened a trainer.
+--
+-- The band rule's early cases have one shape: every recipe it gets early is one whose requirement is
+-- EXACTLY yellow. A requirement is either yellow or roughly yellow-30, and nothing in the data
+-- separates the two populations - not band width, not profession. So there is no rule here that is
+-- both accurate and never early, only a choice of which way to be wrong.
+--
+-- We choose accuracy, because being early no longer costs what it did: an unlearned recipe is charged
+-- UNLEARNED_MARKUP, and GUESSED_MARKUP when the requirement is a guess, so the route will not send
+-- anyone walking for a small gain, and the card never states a guess as a fact. 40 is the widest band
+-- the exact measurements cover; past that we stop extrapolating. LEARN_GAP is the escape hatch below
+-- it, for a rank where nothing else can raise skill at all.
+--
+-- All of it evaporates on the first trainer visit, which records the real number for every recipe
+-- that trainer lists, and the game's own GetTrainerServiceSkillReq always wins.
+local LEARN_BAND_MAX = 40
 local LEARN_GAP = 10
-local LEARN_GAP_FALLBACK = 30    -- used only where the conservative estimate leaves no recipe at all
+local LEARN_GAP_FALLBACK = 30    -- the escape hatch: only where the safe estimate leaves no recipe at all,
+                                 -- and always flagged to the player as an estimate
 local YIELD_EVERY = 20        -- ranks between breaks when solving in the background
 local SWITCH_PENALTY = 3         -- switching recipe costs as much as ~3 skill points (fewer, longer steps)
-local FAST_GOLD_WEIGHT = 1 / (20 * 10000) -- fast mode: 20g of mats counts as one extra craft (tie-breaker)
+-- What a recipe you have not learned has to beat a recipe you have BY, before we send you to a
+-- trainer. Charging nothing for the trip let nine crafts of something unlearned beat ten crafts of
+-- something in the spellbook - and the player had not even met that trainer. A margin, not a ban: a
+-- recipe that genuinely halves the work still wins, and for a character who knows nothing yet every
+-- candidate carries the same markup, so it changes no route there.
+local UNLEARNED_MARKUP = 0.15    -- a trip to a trainer
+local GUESSED_MARKUP = 0.40      -- ...and we are only GUESSING you can learn it yet
+-- FASTEST COUNTS CRAFTS. Nothing else. It weighs no materials, reads no prices, and asks nothing
+-- about the player's gold: the standing assumption, hardcoded and not computed, is that whatever a
+-- step needs can be bought at the auction house or farmed. Higher-tier materials cost more - that is
+-- simply true and needs no arithmetic here. Cheapest is the mode that spends the player's money, and
+-- it is the one that asks what things cost.
+--
+-- What this replaced: a weighting by VENDOR SELL VALUE, which does not mean what it looks like. No
+-- vendor sells an Iron Bar, so its sell price says nothing about getting one. It also produced a
+-- Truesilver Skeleton Key step - 26 bars at 500 each ranked "lighter" than 372 Iron Bars at 150 -
+-- which no player would agree with, next to a Blacksmithing guide that puts iron there.
+--
+-- Recipes that are interchangeable for the plan (same skill to learn, same yellow, same grey, same
+-- skill-ups, same tools and station) still need ONE of them picked, and that choice is made in the
+-- grouping below. That is a choice between recipes of the same tier doing the same job, not a
+-- judgement about the route.
 -- "Prefer vendor materials": materials you have to farm or buy at auction count this many times their price,
 -- and in fast mode each craft that needs them counts as this many extra crafts.
 local VENDOR_BIAS = 2.5
-local FAST_VENDOR_PENALTY = 0.75
--- Materials with no price at all (not sold by vendors, no auction data) may not be for sale anywhere - think
--- enchanting essences, which only come from disenchanting. They count this many times their guessed price.
-local EST_BIAS = 4
+
+-- Below this chance a recipe stops being something you make and becomes something you throw materials
+-- at. With real prices, a nearly-grey recipe with cheap reagents wins on gold per skill point every
+-- time - 34 crafts of a 7.5% Rough Grinding Stone for two points was the cheapest thing on a real
+-- player's route - and no guide should recommend that. So the plan does not use one, unless a rank has
+-- nothing else at all: the floor is the first of three passes, and the others catch what it excludes.
+-- A judgement, not a measurement. The skill-up recording will say whether a quarter is the right line;
+-- until then it is set where "one in four" stops feeling like crafting.
+local CHANCE_FLOOR = 0.25
+-- A material with no vendor price and no auction price has no price here either: nothing is guessed from
+-- its sell price. A route that needs one cannot be costed, so "cheapest" has nothing to compare and the
+-- guide shows the shortest route instead until the player scans.
+
 -- Materials already in your bags or bank (opts.haveMats) count this fraction of their price: not free, so a
 -- small pile can't win a step that needs hundreds, but enough that using what you have wins a close call.
 local HAVE_DISCOUNT = 0.1
 
 SW.Solver = SW.Solver or {}
 local Solver = SW.Solver
+-- Read by the UI: a menu that offers what the planner would refuse is the guide arguing with itself.
+Solver.CHANCE_FLOOR = CHANCE_FLOOR
 
 local function itemFacts(id)
     return SW.Data.items and SW.Data.items[id]
@@ -54,9 +146,16 @@ function Solver.LearnRank(r, opts, fallback)
     local spell = r[F_SPELL]
     local known = opts.learnRanks and opts.learnRanks[spell]
     if known then return known, false end
+    -- You cannot need to learn what you already know. Without this a recipe in the player's own
+    -- spellbook could be locked out of the route by our ESTIMATE of when a trainer teaches it.
+    if opts.known and opts.known[spell] then return 1, false end
     if r[F_LEARN] > 0 then return r[F_LEARN], false end
     if r[F_SRC] == "a" then return 1, false end
-    return max(1, r[F_YELLOW] - (fallback and LEARN_GAP_FALLBACK or LEARN_GAP)), true
+    local yellow, grey = r[F_YELLOW], r[F_GREY] or 0
+    local guess = grey > yellow and (yellow - min(grey - yellow, LEARN_BAND_MAX)) or (yellow - LEARN_GAP)
+    -- the escape hatch has to go LOWER than the ordinary guess, whichever way the band falls
+    if fallback then guess = min(guess, yellow - LEARN_GAP_FALLBACK) end
+    return max(1, guess), true
 end
 
 -- Recipes only one faction can learn (the data lists both as trainer recipes).
@@ -80,7 +179,7 @@ end
 
 ---------------------------------------------------------------------------------------------------- prices
 
--- Price of one unit, in copper, plus where it came from: "ah", "vendor", "craft" or "est".
+-- Price of one unit, in copper, plus where it came from: "ah", "vendor", "craft" or "unknown".
 -- opts.market(id) -> copper|nil is the live market price (auction scan, Auctionator, TSM ...).
 function Solver.NewPricer(prof, opts)
     local cache, busy = {}, {}
@@ -102,22 +201,22 @@ function Solver.NewPricer(prof, opts)
         local maker = makers[id]
         if maker and not busy[id] then
             busy[id] = true
-            local sum, mats = 0, maker[F_MATS]
-            for i = 1, #mats, 2 do sum = sum + mats[i + 1] * (pricer(mats[i])) end
+            local sum, mats, ok = 0, maker[F_MATS], true
+            for i = 1, #mats, 2 do
+                local u, usrc = pricer(mats[i])
+                if usrc == "unknown" or not u then ok = false break end
+                sum = sum + mats[i + 1] * u
+            end
             busy[id] = nil
-            sum = sum / max(1, maker[F_QTY])
-            if not best or sum < best then best, src = sum, "craft" end
+            if not ok then sum = nil end
+            if sum then
+                sum = sum / max(1, maker[F_QTY])
+                if not best or sum < best then best, src = sum, "craft" end
+            end
         end
-        if not best or src == "craft" then
-            -- no market data: a rough guess from the vendor sell price (also caps chains of crafted
-            -- intermediates, which multiply up quickly when their own inputs are guesses)
-            -- vendor sell prices are meaningless for some reagents (essences sell for 1c), so never
-            -- guess below a floor that grows with item level
-            local est = facts and max(1, facts[2] * 4, (facts[5] or 0) ^ 2 * 2) or 1000
-            if not best or est < best then best, src = est, "est" end
-        end
+        if not best then src = "unknown" end     -- no vendor, no auction, not craftable: we do not know
         -- already in the bags or bank (Plan decides what counts: enough of it, and not valuable or rare)
-        if opts.haveMats and opts.haveMats[id] then
+        if opts.haveMats and opts.haveMats[id] and best then
             best, src = best * HAVE_DISCOUNT, "have"
         end
         cache[id] = { best, src }
@@ -126,33 +225,97 @@ function Solver.NewPricer(prof, opts)
     return pricer
 end
 
--- Mats cost of one craft minus what the product sells to a vendor for (never below 10% of the mats).
--- Also returns whether every material comes from a vendor, and the cost weighted for "prefer vendor".
+-- What one craft costs, when we can say. Materials we have no price for (no vendor, no auction scan)
+-- make the whole answer unknown: `sum` and `weighted` come back nil rather than invented. Also returns
+-- whether every material comes from a vendor, and how many materials have no price at all.
 local function craftCost(r, price, preferVendor)
     local sum, vendorSum, weighted, mats = 0, 0, 0, r[F_MATS]
-    local haveAll = #mats > 0
+    local haveAll, unpriced = #mats > 0, 0
     for i = 1, #mats, 2 do
         local unit, src = price(mats[i])
-        local c = mats[i + 1] * unit
-        sum = sum + c
-        if src ~= "have" then haveAll = false end
-        if src == "vendor" or src == "have" then
-            vendorSum = vendorSum + c
-            weighted = weighted + c
-        elseif src == "est" then
-            weighted = weighted + c * EST_BIAS
+        if src == "unknown" or not unit then
+            unpriced = unpriced + 1
+            haveAll = false
         else
-            weighted = weighted + c * (preferVendor and VENDOR_BIAS or 1)
+            local c = mats[i + 1] * unit
+            sum = sum + c
+            if src ~= "have" then haveAll = false end
+            if src == "vendor" or src == "have" then
+                vendorSum = vendorSum + c
+                weighted = weighted + c
+            else
+                weighted = weighted + c * (preferVendor and VENDOR_BIAS or 1)
+            end
         end
     end
-    local vendorOnly = vendorSum >= sum
+    local vendorOnly = unpriced == 0 and vendorSum >= sum
     local facts = r[F_ITEM] > 0 and itemFacts(r[F_ITEM])
     if facts and not facts[4] then
         local resale = facts[2] * r[F_QTY]
         sum = max(sum - resale, sum * 0.1)
         weighted = max(weighted - resale, weighted * 0.1)
     end
-    return sum, vendorOnly, weighted, haveAll
+    if unpriced > 0 then return nil, vendorOnly, nil, haveAll, unpriced end
+    return sum, vendorOnly, weighted, haveAll, 0
+end
+
+---------------------------------------------------------------------------- how heavy the materials are
+
+-- What a recipe's materials weigh, with no prices involved at all: the vendor sell value of the raw
+-- materials, after resolving anything Mining smelts back to the ore it came from. Static, the same on
+-- every server, straight out of the client data - which is what the Fastest guide needs, because a
+-- guide that changes with the auction house is not a guide.
+--
+-- Two other measures were tried first and both rank wrongly, so do not bring them back:
+--   * chain depth (ore is 0, a bar is 1, bronze is 2). Says a copper belt beats bronze leggings. Wrong:
+--     Smelt Bronze makes TWO bars, so a bronze bar costs half a copper ore plus half a tin ore.
+--   * raw unit count after expansion. Says the same bronze bar and copper bar are equal - one ore each -
+--     so 6 bronze (6 ore) beats 12 copper (12 ore). Also wrong: tin is not copper. Tin ore sells for 25c
+--     against copper's 5c and is mined a whole tier later.
+-- Sell value gets it right because the game already ranks materials that way: 6 bronze bars expand to
+-- 3 copper + 3 tin ore = 90c, against 12 copper bars = 60c. Bronze is half again dearer, not half price.
+local weightCache = {}
+local function rawValue(id, depth)
+    local cached = weightCache[id]
+    if cached then return cached end
+    local made = SW.Data.smelting and SW.Data.smelting[id]
+    local value
+    if made and (depth or 0) < 6 then
+        local qty, mats = made[1], made[2]
+        local sum = 0
+        for i = 1, #mats, 2 do
+            sum = sum + mats[i + 1] * rawValue(mats[i], (depth or 0) + 1)
+        end
+        value = sum / max(1, qty)
+    else
+        local facts = itemFacts(id)
+        value = (facts and facts[2] or 0)
+    end
+    weightCache[id] = value
+    return value
+end
+
+--- Does a vendor stock every material? Static: the datamined vendor price, not an auction or a scan.
+--- Only 35 of the 513 materials recipes use have one, so this separates few recipes - but when it does,
+--- "walk to a shop" really is easier than "go and mine it", and that is worth a nudge.
+function Solver.AllFromVendor(r)
+    local mats = r[F_MATS]
+    if #mats == 0 then return false end
+    for i = 1, #mats, 2 do
+        local facts = itemFacts(mats[i])
+        if not (facts and (facts[1] or 0) > 0) then return false end
+    end
+    return true
+end
+
+--- The static weight of one craft, plus how many different materials it needs.
+function Solver.StaticWeight(r)
+    local mats, sum, kinds = r[F_MATS], 0, 0
+    for i = 1, #mats, 2 do
+        sum = sum + mats[i + 1] * rawValue(mats[i], 0)
+        kinds = kinds + 1
+    end
+    return sum, kinds
 end
 
 ---------------------------------------------------------------------------------------------------- tools
@@ -169,6 +332,50 @@ end
 
 local toolItemCache = {}
 -- Items that count as tool category `cat`, lowest tier first (a Runed Silver Rod counts for copper-rod recipes).
+-- Known recipes that still give skill at `rank`, orange ones marked as guaranteed. The guide offers these
+-- as alternatives to the step, so the player can make what they actually hold materials for.
+function Solver.Interchangeable(prof, rank, opts)
+    local data = SW.Data.professions[prof]
+    if not (data and opts and opts.known) then return {} end
+    local price = Solver.NewPricer(prof, opts)
+    local out = {}
+    for _, r in ipairs(data[2]) do
+        if opts.known[r[F_SPELL]] and not (r[F_CAMP] and not opts.allowCamp) then
+            local seen = opts.colors and opts.colors[r[F_SPELL]]
+            local yellow = (seen and seen.yellow) or r[F_YELLOW]
+            local grey = (seen and seen.grey) or r[F_GREY]
+            if Solver.Chance(yellow, grey, rank) > 0 then
+                local toolsOK = true
+                for _, cat in ipairs(r[F_TOOLS] or {}) do
+                    if not Solver.HasTool(cat, opts.owned or {}) then toolsOK = false break end
+                end
+                if toolsOK then
+                    local cost, vendorOnly, _, haveAll = craftCost(r, price, opts.preferVendor)
+                    -- per-craft only: how many crafts this would take depends on where the player is,
+                    -- so `count` is filled in by whoever turns this into a step (Plan.Current)
+                    local priced = {}
+                    for i = 1, #r[F_MATS], 2 do
+                        local unit, src = price(r[F_MATS][i])
+                        priced[#priced + 1] = { id = r[F_MATS][i], per = r[F_MATS][i + 1], unit = unit,
+                                                full = (src == "have") and (unit / HAVE_DISCOUNT) or unit,
+                                                priceSource = src }
+                    end
+                    local learn, learnEst = Solver.LearnRank(r, opts)
+                    out[#out + 1] = { spell = r[F_SPELL], item = r[F_ITEM], qty = r[F_QTY], mats = r[F_MATS],
+                                      cost = cost, ups = max(1, r[F_UPS]), vendorOnly = vendorOnly,
+                                      yellow = yellow, grey = grey, guaranteed = rank < yellow or nil,
+                                      priced = priced, haveMats = haveAll,
+                                      -- what it IS, so a card showing it does not describe the recipe
+                                      -- it replaced: where it comes from, what it needs, what it uses
+                                      source = r[F_SRC], recipeItem = r[F_RITEM], station = r[F_STATION],
+                                      tools = r[F_TOOLS], learn = learn, learnEstimated = learnEst }
+                end
+            end
+        end
+    end
+    return out
+end
+
 function Solver.ToolItems(cat)
     local cached = toolItemCache[cat]
     if cached then return cached end
@@ -228,22 +435,34 @@ function Solver.GapOptions(prof, rank, opts, price, limit)
             if learn <= rank and p >= 0.5 then
                 list[#list + 1] = { spell = r[F_SPELL], item = r[F_ITEM], source = r[F_SRC], recipeItem = r[F_RITEM],
                                     yellow = r[F_YELLOW], grey = r[F_GREY], learn = learn,
-                                    score = (craftCost(r, price)) / p }
+                                    -- no price for its materials: rank it by crafts, not by a guess
+                                    score = ((craftCost(r, price)) or 0) / p, cost = (craftCost(r, price)) }
             end
         end
     end
-    table.sort(list, function(a, b) return a.score < b.score end)
+    table.sort(list, function(a, b)
+        if a.score ~= b.score then return a.score < b.score end
+        return a.spell < b.spell
+    end)
     for i = (limit or 6) + 1, #list do list[i] = nil end
     return list
 end
 
 ---------------------------------------------------------------------------------------------------- solve
 
+-- A step's materials, in the one shape everything downstream expects:
+--   { id, per (one craft), count (the whole step), unit (copper each), priceSource }
+-- Anything that builds this table by hand must fill in all five - a missing `count` used to throw in the
+-- route tooltip, which only runs on hover, so nothing caught it until a player did.
 local function matsOf(r, crafts, price)
     local out, mats = {}, r[F_MATS]
     for i = 1, #mats, 2 do
         local unit, src = price(mats[i])
-        out[#out + 1] = { id = mats[i], count = mats[i + 1] * crafts, per = mats[i + 1], unit = unit, priceSource = src }
+        -- `unit` is what the SOLVER paid (materials in the bags count as nearly free, which is right for
+        -- choosing between recipes); `full` is what the shop would charge, for anything shown to a player.
+        out[#out + 1] = { id = mats[i], count = mats[i + 1] * crafts, per = mats[i + 1], unit = unit,
+                          full = (src == "have") and unit and (unit / HAVE_DISCOUNT) or unit,
+                          priceSource = src }
     end
     return out
 end
@@ -258,6 +477,7 @@ end
 --   market        function(item) -> copper|nil
 --   haveMats      { [item] = true } materials already in the bags or bank, worth counting as good as owned
 --   owned         { [item] = true } tools the character already has
+--   breaks        { [rank] = true } ranks no step may run through (trainer visits)
 --   allowCamp     include recipes that need a camp station
 -- Returns { steps = { step, ... }, crafts = n, cost = copper, gapAt = rank|nil }
 -- step = { from, to, spell, item, qty, crafts, mats = { {id, count, per, unit, priceSource}, ... }, cost, source,
@@ -268,19 +488,32 @@ function Solver.Solve(prof, opts)
     if not data then return nil end
     local from, to = opts.from or 1, opts.to or 300
     local fast = opts.mode == "fast"
+    local pricesUnknown = false
     local preferVendor = opts.preferVendor
     local price = Solver.NewPricer(prof, opts)
 
     local cands, bySpell, makers = {}, {}, {}
     for _, r in ipairs(data[2]) do
         if usable(r, opts) then
-            local cost, vendorOnly, weighted, haveAll = craftCost(r, price, preferVendor)
+            local cost, vendorOnly, weighted, haveAll, unpriced = craftCost(r, price, preferVendor)
             -- the skill each recipe needs and gives, worked out once: the rank loop below runs 300 times
             local learn = Solver.LearnRank(r, opts, false)
             local learnFB = Solver.LearnRank(r, opts, true)
+            -- Thresholds the game itself showed us beat our datamined ones (Forever moved some)
+            local seen = opts.colors and opts.colors[r[F_SPELL]]
+            local yellow = (seen and seen.yellow) or r[F_YELLOW]
+            local grey = (seen and seen.grey) or r[F_GREY]
+            -- only guard numbers we learned in game: the datamined pairs may legitimately be equal
+            if seen and grey <= yellow then grey = yellow + 1 end
+            local _, learnIsGuess = Solver.LearnRank(r, opts, false)
+            local unlearned = not (opts.known and opts.known[r[F_SPELL]])
+            local markup = unlearned and (learnIsGuess and GUESSED_MARKUP or UNLEARNED_MARKUP) or 0
+            local staticWeight, kinds = Solver.StaticWeight(r)
             local c = { r = r, cost = cost, vendorOnly = vendorOnly, weight = weighted, haveMats = haveAll,
+                        unpriced = unpriced, staticWeight = staticWeight, kinds = kinds,
                         learn = learn, learnFB = learnFB, first = learn < learnFB and learn or learnFB,
-                        yellow = r[F_YELLOW], grey = r[F_GREY], ups = max(1, r[F_UPS]) }
+                        markup = markup,
+                        yellow = yellow, grey = grey, ups = max(1, r[F_UPS]) }
             cands[#cands + 1] = c
             bySpell[r[F_SPELL]] = c
             if r[F_ITEM] > 0 and not makers[r[F_ITEM]] then makers[r[F_ITEM]] = r end
@@ -300,8 +533,8 @@ function Solver.Solve(prof, opts)
             local tools = r[F_TOOLS]
             local key = ("%d:%d:%d:%d:%d:%s:%s"):format(c.learn, c.learnFB, c.yellow, c.grey, c.ups,
                 tools and #tools > 0 and table.concat(tools, ",") or "-", r[F_STATION])
-            c.score = fast and (1 + ((preferVendor and not c.vendorOnly) and FAST_VENDOR_PENALTY or 0)
-                + c.weight * FAST_GOLD_WEIGHT) or c.weight
+            c.score = fast and (c.staticWeight + c.kinds * 0.01 + (Solver.AllFromVendor(r) and 0 or 0.001))
+                or (c.weight or math.huge)
             local g = groups[key]
             if not g then
                 g = { members = {} }
@@ -321,16 +554,54 @@ function Solver.Solve(prof, opts)
                 best.alts = {}
                 for _, c in ipairs(g.members) do
                     if c ~= best then
-                        best.alts[#best.alts + 1] = { spell = c.r[F_SPELL], item = c.r[F_ITEM], cost = c.cost }
+                        -- yellow/grey travel with it: whoever offers this to the player has to be
+                        -- able to ask whether it is grey for them, and the group's own thresholds
+                        -- are not the answer when the player is above them.
+                        best.alts[#best.alts + 1] = { spell = c.r[F_SPELL], item = c.r[F_ITEM],
+                                                      cost = c.cost, yellow = c.yellow, grey = c.grey }
                     end
                 end
-                table.sort(best.alts, function(a, b) return a.cost < b.cost end)
+                -- a cost we do not know sorts last rather than throwing
+                table.sort(best.alts, function(a, b)
+                    if a.cost and b.cost then return a.cost < b.cost end
+                    if a.cost then return true end
+                    if b.cost then return false end
+                    return a.spell < b.spell
+                end)
                 best.chosenByPlayer = g.chosenByPlayer or nil
             end
             kept[#kept + 1] = best
         end
         cands = kept
     end
+    -- Can we price THIS stretch? Only recipes that could be used before `to` matter: an endgame
+    -- reagent nobody can price says nothing about a route that ends at 150, and asking about the whole
+    -- profession is what used to turn Cheapest off for everyone.
+    -- priceHorizon is the first rank where that stops being true - the lowest rank at which a recipe we
+    -- cannot price could be reached. Below it, "cheapest" compares real prices; above it, it would be
+    -- comparing against a hole.
+    local priceHorizon
+    for _, c in ipairs(cands) do
+        if (c.unpriced or 0) > 0 and c.first < to then
+            pricesUnknown = true
+            if not priceHorizon or c.first < priceHorizon then priceHorizon = c.first end
+        end
+    end
+    -- Cheapest as far as the prices reach, then fewest crafts: two objectives that cannot share one
+    -- table (copper and crafts do not add up), so they are two solves joined at the horizon. The break
+    -- machinery already keeps a step from running through that rank.
+    if opts.mode == "cheap" and not opts.oneObjective and priceHorizon
+       and priceHorizon > from and priceHorizon < to then
+        local under = { to = priceHorizon, oneObjective = true }
+        local over = { from = priceHorizon, mode = "fast", oneObjective = true }
+        local a = Solver.Solve(prof, setmetatable(under, { __index = opts }))
+        local b = Solver.Solve(prof, setmetatable(over, { __index = opts }))
+        if a and b then return Solver.Join(a, b, priceHorizon) end
+        return a or b
+    end
+    if pricesUnknown then fast = true end
+
+
     -- lowest skill needed first, so the loop can stop where the rest are still out of reach
     table.sort(cands, function(a, b)
         if a.first ~= b.first then return a.first < b.first end
@@ -356,18 +627,25 @@ function Solver.Solve(prof, opts)
     end
 
     -- per-attempt cost of recipe c at rank `rank`, or nil when it can't give a skill-up there
-    local function stepCost(c, rank, fallback)
+    local function stepCost(c, rank, fallback, floorOn)
         if rank >= c.grey then return nil end                 -- grey: no skill from it
         if (fallback and c.learnFB or c.learn) > rank then return nil end
         local r = c.r
         local p = Solver.Chance(c.yellow, c.grey, rank)
         if p <= 0 then return nil end
+        -- unless they asked for this one: the floor decides what we RECOMMEND, never what a
+        -- player is allowed to make. A choice outranks our judgement about the odds.
+        if floorOn and p < CHANCE_FLOOR and not c.chosenByPlayer then return nil end
         if not toolsOK(r, rank) then return nil end
         if fast then
-            local extra = (preferVendor and not c.vendorOnly) and FAST_VENDOR_PENALTY or 0
-            return (1 + extra + c.weight * FAST_GOLD_WEIGHT) / p
+            -- one craft. The markup is not a material cost - it is what a trip to a trainer is worth.
+            return (1 + (c.markup or 0)) / p
         end
-        return c.weight / p
+        -- Ranking by gold, and this one has no gold figure: it can never be the cheapest answer, because
+        -- we do not know what it costs. Not a guess at its price - a refusal to rank it against real ones.
+        -- The range is chosen so this cannot normally happen (see priceHorizon); this is the floor under it.
+        if not c.weight then return huge end
+        return c.weight * (1 + (c.markup or 0)) / p
     end
 
     -- f[rank][ci] = cost of reaching `to` from `rank` crafting cands[ci] now
@@ -378,6 +656,23 @@ function Solver.Solve(prof, opts)
     -- opts.yield (set when the plan is solved in the background) is called every so often so a long route
     -- can be spread over several frames instead of freezing one.
     local yield, sinceYield = opts.yield, 0
+    -- Ranks a step may not run through: the trainer visits. A run of one recipe that spans 75 would put
+    -- "70-90 Rough Grinding Stone" on the page with the visit hidden somewhere inside it. Ending the run
+    -- at the cap costs one switch and makes the list readable in the order you do it. nextBreak[rank] is
+    -- the first cap above that rank, so a craft that jumps over one (three skill points from 74 to 77)
+    -- still ends its run there.
+    local breaksAt = opts.breaks or {}
+    local nextBreak = {}
+    do
+        local caps = {}
+        for rank in pairs(opts.breaks or {}) do caps[#caps + 1] = rank end
+        table.sort(caps)
+        local i = 1
+        for rank = 0, to do
+            while caps[i] and caps[i] <= rank do i = i + 1 end
+            nextBreak[rank] = caps[i]
+        end
+    end
     for rank = to - 1, from, -1 do
         if yield then
             sinceYield = sinceYield + 1
@@ -389,18 +684,21 @@ function Solver.Solve(prof, opts)
         while last > 0 and cands[last].first > rank do last = last - 1 end
         local row, b, bs = {}, huge, huge
         local usedFallback = false
-        for pass = 1, 2 do
-            local fallback = pass == 2
+        for pass = 1, 3 do
+            local fallback = pass == 3
+            local floorOn = pass == 1
             for ci = 1, last do
                 local c = cands[ci]
-                local sc = stepCost(c, rank, fallback)
+                local sc = stepCost(c, rank, fallback, floorOn)
                 if sc then
-                    local nxt = min(rank + c.ups, to)
+                    local cap = nextBreak[rank]
+                    local nxt = min(rank + c.ups, cap or to, to)
                     local tail
                     if nxt >= to then
                         tail = 0
                     else
-                        local stay = f[nxt] and f[nxt][ci]
+                        -- at a cap the run is over, whatever continuing would have cost
+                        local stay = not (cap and nxt >= cap) and f[nxt] and f[nxt][ci]
                         local switch = best[nxt] + SWITCH_PENALTY * bestStep[nxt]
                         tail = (stay and stay < switch) and stay or switch
                     end
@@ -437,13 +735,13 @@ function Solver.Solve(prof, opts)
         end
         local c = cands[pick]
         local r = c.r
-        local p = Solver.Chance(r[F_YELLOW], r[F_GREY], rank)
-        local ups = max(1, r[F_UPS])
+        local p = Solver.Chance(c.yellow, c.grey, rank)
+        local ups = c.ups
         local step = steps[#steps]
-        if pick ~= cur or not step then
+        if pick ~= cur or not step or breaksAt[rank] then
             local learn, est = Solver.LearnRank(r, opts, fb[rank])
             step = { from = rank, to = rank, spell = r[F_SPELL], item = r[F_ITEM], qty = r[F_QTY],
-                     yellow = r[F_YELLOW], grey = r[F_GREY], source = r[F_SRC], recipeItem = r[F_RITEM],
+                     yellow = c.yellow, grey = c.grey, source = r[F_SRC], recipeItem = r[F_RITEM],
                      station = r[F_STATION], learn = learn, learnEstimated = est, vendorOnly = c.vendorOnly,
                      haveMats = c.haveMats,
                      attempts = 0, costEach = c.cost, tools = r[F_TOOLS],
@@ -451,7 +749,7 @@ function Solver.Solve(prof, opts)
             steps[#steps + 1] = step
         end
         step.attempts = step.attempts + 1 / p
-        rank = min(rank + ups, to)
+        rank = min(rank + ups, nextBreak[rank] or to, to)
         step.to = rank
         cur = pick
     end
@@ -481,15 +779,45 @@ function Solver.Solve(prof, opts)
         end
     end
 
+    local costKnown = true
     for _, s in ipairs(steps) do
         s.crafts = ceil(s.attempts - 1e-6)
-        s.cost = s.crafts * s.costEach
+        s.cost = s.costEach and s.crafts * s.costEach or nil
         s.mats = matsOf(bySpell[s.spell].r, s.crafts, price)
         s.prereqs = {}
         for _, cat in ipairs(s.tools or {}) do addTool(s.prereqs, cat, s.from) end
         total = total + s.crafts
-        cost = cost + s.cost
+        if s.cost then cost = cost + s.cost else costKnown = false end
         for _, t in ipairs(s.prereqs) do cost = cost + (t.cost or 0) end
     end
-    return { steps = steps, crafts = total, cost = cost, from = from, to = to, mode = opts.mode }
+    -- `cost` covers only what we could price; pricesUnknown says the rest exists and was not invented
+    local staticWeight = 0
+    for _, s in ipairs(steps) do
+        staticWeight = staticWeight + s.crafts * (Solver.StaticWeight(bySpell[s.spell].r))
+    end
+    return { steps = steps, crafts = total, weight = staticWeight,
+             cost = costKnown and cost or nil, knownCost = cost,
+             pricesUnknown = pricesUnknown or not costKnown, from = from, to = to, mode = opts.mode,
+             -- how far this plan could be costed at all, for the page to say out loud
+             pricedTo = (not fast and not pricesUnknown) and to or nil }
+end
+
+--- Two halves of one route: cheapest as far as the prices reach, fewest crafts after that.
+--- Everything the page reads has to survive the join, and the gold total may only cover the half we
+--- could actually price - saying that is the whole point of splitting rather than quietly picking one.
+function Solver.Join(a, b, horizon)
+    local steps = {}
+    for _, s in ipairs(a.steps) do steps[#steps + 1] = s end
+    for _, s in ipairs(b.steps) do steps[#steps + 1] = s end
+    return {
+        steps = steps,
+        crafts = a.crafts + b.crafts,
+        cost = nil,                                  -- only half of it is known; knownCost carries that
+        knownCost = (a.knownCost or 0) + (b.knownCost or 0),
+        pricesUnknown = true,
+        from = a.from, to = b.to, mode = "cheap",
+        pricedTo = horizon,
+        gapAt = a.gapAt or b.gapAt,
+        gapOptions = a.gapOptions or b.gapOptions,
+    }
 end

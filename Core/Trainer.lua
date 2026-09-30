@@ -67,43 +67,85 @@ function T.WhereIs(prof, tier)
 end
 
 local function LinkItem(i)
+    if not GetTrainerServiceItemLink then return nil end
     local link = GetTrainerServiceItemLink(i)
     return link and tonumber(link:match("item:(%d+)"))
+end
+
+-- Name and kind of a trainer service. The kind is found by VALUE, not by position: we read the third slot
+-- for two releases, which in this client is the texture, so "header" never matched and nothing was ever
+-- "available" - the Train button simply never appeared, and nothing failed loudly enough to notice.
+-- Taking whichever field actually says one of the four kinds cannot make that mistake, and if Blizzard
+-- moves the fields again it comes back nil (visible) instead of a texture (silently wrong).
+-- Forever returns (name, type, texture, reqLevel, subText). Found by ballzac81.
+local KINDS = { available = true, unavailable = true, used = true, header = true }
+local function ServiceInfo(i)
+    if not GetTrainerServiceInfo then return nil, nil end
+    local a, b, c = GetTrainerServiceInfo(i)
+    local kind = (type(b) == "string" and KINDS[b] and b)
+        or (type(c) == "string" and KINDS[c] and c)
+        or nil
+    return a, kind
 end
 
 -- The trainer window hides services by default ("available" only), and the hidden ones are exactly the
 -- interesting ones: a recipe the character can't train yet still states the skill it needs. So every
 -- filter is turned on for the read and the player's own filters are put back straight after.
 local FILTERS = { "available", "unavailable", "used" }
-local saved, restoring
+local saved       -- the player's own filters while we have ours on
+local busy        -- true while WE are changing filters: every event in that window is ours, so ignore it
+local deepDone    -- the one deep read of this trainer window has been done
 
+-- ClassTrainerFrame is reused for profession trainers AND pet/class/riding trainers.
+-- Replacing ClassTrainerFrame_Update taints that shared frame, so the default Train
+-- button dies with ADDON_ACTION_FORBIDDEN on BuyTrainerService — including pet training.
+-- Do not wrap or replace any Blizzard trainer function.
+local function HoldRedraw() end
+local function ReleaseRedraw() end
+
+local function IsProfessionTrainer()
+    return IsTradeskillTrainer and IsTradeskillTrainer() and true or false
+end
+
+-- Turning a filter on rebuilds the list and fires TRAINER_UPDATE. Reacting to that event would set the
+-- filters again, and the list would flicker for as long as the window is open (seen in beta4). So the
+-- deep read happens once per trainer window and every event it causes is ignored.
 local function OpenAllFilters()
     if not (GetTrainerServiceTypeFilter and SetTrainerServiceTypeFilter) then return false end
-    -- Only the first pass remembers the player's own filters: the read that follows sees them all on.
-    local first = saved == nil
-    if first then saved = {} end
-    local changed = false
+    local mine, changed = {}, false
     for _, f in ipairs(FILTERS) do
-        local on = GetTrainerServiceTypeFilter(f)
-        if first then saved[f] = on end
-        if not on then
-            changed = true
-            SetTrainerServiceTypeFilter(f, true)
-        end
+        local on = not not GetTrainerServiceTypeFilter(f)
+        mine[f] = on
+        if not on then changed = true end
     end
-    return changed
+    if not changed then return false end       -- everything is already visible: nothing to do, no blink
+    saved = mine
+    busy = true
+    HoldRedraw()
+    for _, f in ipairs(FILTERS) do
+        if not mine[f] then SetTrainerServiceTypeFilter(f, true) end
+    end
+    return true
 end
 
 local function RestoreFilters()
-    if not saved then return end
+    if not saved then
+        busy = false
+        ReleaseRedraw()
+        return
+    end
     local mine = saved
     saved = nil
-    restoring = true
     for _, f in ipairs(FILTERS) do
         if not mine[f] then SetTrainerServiceTypeFilter(f, false) end
     end
-    restoring = false
+    -- the events from putting them back arrive next frame: stay deaf until they have passed
+    C_Timer.After(0, function()
+        busy = false
+        ReleaseRedraw()
+    end)
 end
+
 
 T.services = {}     -- [spell] = { index, type } for the open trainer
 T.prof = nil        -- profession of the open trainer
@@ -111,24 +153,17 @@ T.prof = nil        -- profession of the open trainer
 -- Match every service to a recipe. Recipe names aren't unique (two "Faction Banner"s, two "Dark Leather
 -- Boots"), so the item a service makes decides first - within the trainer's own profession - and the
 -- name is only used for services that make no item.
-local function Scan()
-    if restoring then return end
+local function Read()
     wipe(T.services)
     T.prof = nil
     Index()
-    -- everything the trainer has, including what this character can't train yet
-    if OpenAllFilters() then
-        -- the list is rebuilt for the new filters: read on the next update instead
-        C_Timer.After(0.05, function() Scan() end)
-        return
-    end
     local db = SW.DB()
     local n = GetNumTrainerServices() or 0
 
     -- 1. which profession is this trainer for? The one most of its item links belong to.
     local profCount = {}
     for i = 1, n do
-        local _, _, kind = GetTrainerServiceInfo(i)
+        local _, kind = ServiceInfo(i)
         local id = kind ~= "header" and LinkItem(i)
         for _, hit in ipairs(id and byItem[id] or {}) do profCount[hit[1]] = (profCount[hit[1]] or 0) + 1 end
     end
@@ -138,7 +173,7 @@ local function Scan()
         -- an enchanting trainer's services make no items: fall back to names
         local nameCount = {}
         for i = 1, n do
-            local name, _, kind = GetTrainerServiceInfo(i)
+            local name, kind = ServiceInfo(i)
             if name and kind ~= "header" then
                 for p, names in pairs(byName) do
                     if names[name] then nameCount[p] = (nameCount[p] or 0) + 1 end
@@ -153,7 +188,7 @@ local function Scan()
     -- 2. each service -> its recipe in that profession
     local learned = 0
     for i = 1, (prof and n or 0) do
-        local name, _, kind = GetTrainerServiceInfo(i)
+        local name, kind = ServiceInfo(i)
         if name and kind ~= "header" then
             local spell
             local id = LinkItem(i)
@@ -198,7 +233,6 @@ local function Scan()
             end
         end
     end
-    RestoreFilters()
     if learned > 0 then
         local d = db.drift
         SW.dbg("trainer: learned the required skill of %d recipes%s", learned,
@@ -225,15 +259,49 @@ end
 
 function T.Train(list)
     if SW.CombatBlocked("train") then return end
-    -- Highest index first: learning a service can shift the ones after it.
-    table.sort(list, function(a, b) return a.index > b.index end)
-    for _, svc in ipairs(list) do BuyTrainerService(svc.index) end
+    -- BuyTrainerService is protected. Calling it from addon code produces
+    -- ADDON_ACTION_FORBIDDEN and poisons the default Train button (pets included).
+    local n = type(list) == "table" and #list or 0
+    if n == 0 then
+        SW.msg("nothing to train here - pick the recipe in the trainer window and click Train.")
+        return
+    end
+    SW.msg("the game will not let addons learn skills for you. In the trainer window, click |cffffd100Train|r for the highlighted recipe%s.", n == 1 and "" or "s")
+    C_Timer.After(0.5, function()
+        SW.Prof.ScanKnownSpells()
+        SW.Fire("RECIPES_CHANGED")
+    end)
 end
 
-SW.On("TRAINER_SHOW", function() SW.Debounce("trainer", 0.2, Scan) end)
-SW.On("TRAINER_UPDATE", function() SW.Debounce("trainer", 0.3, Scan) end)
+-- Read what the player's own filters show. Once per trainer window, and only if they asked for it,
+-- also read the hidden services: filters on, read, filters back, done - one blink, never a loop.
+local function Scan()
+    if busy then return end
+    if not IsProfessionTrainer() then return end
+    Read()
+    if deepDone or SW.Settings().deepTrainerScan == false then return end
+    deepDone = true
+    if not OpenAllFilters() then return end       -- already all visible: the read above was the deep one
+    C_Timer.After(0.05, function()
+        Read()
+        RestoreFilters()
+        SW.Fire("TRAINER_CHANGED")
+    end)
+end
+
+SW.On("TRAINER_SHOW", function()
+    deepDone = false
+    if not IsProfessionTrainer() then return end
+    SW.Debounce("trainer", 0.2, Scan)
+end)
+SW.On("TRAINER_UPDATE", function()
+    if busy then return end                        -- our own filter change: not a reason to scan again
+    if not IsProfessionTrainer() then return end
+    SW.Debounce("trainer", 0.3, Scan)
+end)
 SW.On("TRAINER_CLOSED", function()
     RestoreFilters()
+    deepDone = false
     wipe(T.services)
     T.prof = nil
     SW.Fire("TRAINER_CHANGED")

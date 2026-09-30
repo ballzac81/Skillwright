@@ -75,6 +75,15 @@ function Page.Build(f)
         { value = "fast", label = "Fastest", tooltip = "The fewest crafts per skill point." },
     }, 180, function(v) SW.SetMode(v) end)
     f.mode:SetPoint("LEFT", 70, 0)
+
+    -- Fastest counts crafts. The two sentences that used to follow this one described a
+    -- tolerance and then a material tie-break, and both are gone: the user's rule is that
+    -- Fastest does not read price of any kind, and "which materials are easier to come by"
+    -- was vendor sell value wearing a friendlier name.
+    text("|cffffd100Fastest|r is the fewest crafts, and never more than that. It reads no prices "
+        .. "at all and asks nothing about your gold - it assumes you can buy or farm what a step "
+        .. "needs - so the Fastest route is the same for everyone. |cffffd100Cheapest|r is the mode "
+        .. "that spends your money, and the one that asks what things cost.", nil, 4, 4)
     checkbox("Prefer materials from vendors", "preferVendor",
         "Recipes whose materials you can simply buy come first, even if that means a few more crafts.",
         function() Plan.Invalidate() end)
@@ -113,6 +122,16 @@ function Page.Build(f)
         "Just the recipe to make, its materials and the Craft button. The - / + button by the close button "
         .. "switches too.", function() SW.SetMinimal(SW.Settings().minimal) end)
 
+    checkbox("Auction price on item tooltips", "tooltipPrice",
+        "One line on any item tooltip with what the auction house wants for it, and where that number "
+        .. "came from. Nothing is shown for items we have no price for.")
+
+    -- Trainers
+    heading("Trainers")
+    checkbox("Read everything a trainer teaches", "deepTrainerScan",
+        "Once per trainer, Skillwright also reads what you can't learn yet, to get the real skill each "
+        .. "recipe needs. The trainer's list blinks once while it does. Your own filters are put back.")
+
     -- Enchanting
     heading("Enchanting")
     checkbox("Say Yes to \"replace enchant\" automatically", "autoReplaceEnchant",
@@ -122,7 +141,8 @@ function Page.Build(f)
     -- How it works, and what it can't know yet
     heading("Good to know")
     text("|cffffd100Prices|r come from Auctionator or TSM when installed, else from your own scan: open the "
-        .. "auction house and press |cffffd100Scan prices|r. Without any, prices are estimates (marked est.).",
+        .. "auction house and press |cffffd100Scan prices|r. Without them only vendor prices are known - "
+        .. "nothing else is guessed, and the guide shows the shortest route instead of the cheapest.",
         nil, 4, 6)
     text("|cffffd100Trainer recipes:|r the game doesn't say what skill one needs until you see it at a trainer. "
         .. "Until then the plan estimates it (marked estimated).", nil, 4, 6)

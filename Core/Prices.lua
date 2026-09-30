@@ -24,12 +24,22 @@ local function FromTSM(id)
     return ok and price or nil
 end
 
--- Our own scan, as long as it isn't older than the "prices go stale" setting (days).
+-- When this session started. Prices age between sessions, never during one: a scan that crosses the
+-- "prices go stale" line while the player is reading the guide would otherwise pull the plan apart
+-- under them, and the route would silently shorten mid-session. A new scan moves the line instead.
+local sessionStart = nil
+local function Now()
+    sessionStart = sessionStart or SW.Now()
+    return sessionStart
+end
+SW.Listen("LOGIN", function() sessionStart = SW.Now() end)
+
+-- Our own scan, as long as it wasn't already stale when this session began.
 local function OwnScan(id)
     local e = SW.DB().ah[id]
     if not e then return nil end
     local maxAge = (SW.Settings().maxPriceAge or 3) * 86400
-    if e[2] and SW.Now() - e[2] > maxAge then return nil end
+    if e[2] and Now() - e[2] > maxAge then return nil end
     return e[1]
 end
 
@@ -60,17 +70,13 @@ function Pr.SourceText()
     return table.concat(parts, ", ")
 end
 
-function Pr.HasMarket()
-    return Pr.SourceText() ~= nil
-end
-
 -- Whether the guide has real auction prices: "addon" (Auctionator/TSM), "scan" (our own, fresh enough),
 -- "stale" (our scan is older than the "prices go stale" setting) or "none".
 function Pr.Status()
     if (Auctionator and Auctionator.API) or TSM_API then return "addon" end
     local t = SW.DB().ahScanned or 0
     if t <= 0 then return "none" end
-    if SW.Now() - t > (SW.Settings().maxPriceAge or 3) * 86400 then return "stale" end
+    if Now() - t > (SW.Settings().maxPriceAge or 3) * 86400 then return "stale" end
     return "scan"
 end
 
