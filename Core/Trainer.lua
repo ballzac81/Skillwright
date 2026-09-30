@@ -27,8 +27,6 @@ local function Index()
     end
 end
 
--- Where the trainers are: what we see in game, kept account-wide, so every character is told where the
--- last one was found. The client data has no trainer locations at all, hence remembering our own.
 function T.Remember(prof)
     if not prof then return end
     local who = UnitName("npc")
@@ -52,8 +50,6 @@ function T.Remember(prof)
     SW.Fire("TRAINER_PLACES")
 end
 
--- One line about where to find a trainer for this profession, and whether it is something we saw
--- ourselves (true) or Classic knowledge that may be wrong in Forever (false).
 function T.WhereIs(prof, tier)
     local seen = SW.DB().trainers and SW.DB().trainers[prof]
     if seen and seen.who then
@@ -67,78 +63,94 @@ function T.WhereIs(prof, tier)
 end
 
 local function LinkItem(i)
+    if not GetTrainerServiceItemLink then return nil end
     local link = GetTrainerServiceItemLink(i)
     return link and tonumber(link:match("item:(%d+)"))
 end
 
--- The trainer window hides services by default ("available" only), and the hidden ones are exactly the
--- interesting ones: a recipe the character can't train yet still states the skill it needs. So every
--- filter is turned on for the read and the player's own filters are put back straight after.
+-- Forever returns (name, type, texture, reqLevel, subText). Found by ballzac81.
+local KINDS = { available = true, unavailable = true, used = true, header = true }
+local function ServiceInfo(i)
+    if not GetTrainerServiceInfo then return nil, nil end
+    local a, b, c = GetTrainerServiceInfo(i)
+    local kind = (type(b) == "string" and KINDS[b] and b)
+        or (type(c) == "string" and KINDS[c] and c)
+        or nil
+    return a, kind
+end
+
 local FILTERS = { "available", "unavailable", "used" }
-local saved, restoring
+local saved
+local busy
+local deepDone
+
+-- ClassTrainerFrame is reused for profession AND pet/class/riding trainers.
+-- Replacing ClassTrainerFrame_Update taints that shared frame, so the default
+-- Train button dies with ADDON_ACTION_FORBIDDEN on BuyTrainerService.
+local function HoldRedraw() end
+local function ReleaseRedraw() end
+
+local function IsProfessionTrainer()
+    return IsTradeskillTrainer and IsTradeskillTrainer() and true or false
+end
 
 local function OpenAllFilters()
     if not (GetTrainerServiceTypeFilter and SetTrainerServiceTypeFilter) then return false end
-    -- Only the first pass remembers the player's own filters: the read that follows sees them all on.
-    local first = saved == nil
-    if first then saved = {} end
-    local changed = false
+    local mine, changed = {}, false
     for _, f in ipairs(FILTERS) do
-        local on = GetTrainerServiceTypeFilter(f)
-        if first then saved[f] = on end
-        if not on then
-            changed = true
-            SetTrainerServiceTypeFilter(f, true)
-        end
+        local on = not not GetTrainerServiceTypeFilter(f)
+        mine[f] = on
+        if not on then changed = true end
     end
-    return changed
+    if not changed then return false end
+    saved = mine
+    busy = true
+    HoldRedraw()
+    for _, f in ipairs(FILTERS) do
+        if not mine[f] then SetTrainerServiceTypeFilter(f, true) end
+    end
+    return true
 end
 
 local function RestoreFilters()
-    if not saved then return end
+    if not saved then
+        busy = false
+        ReleaseRedraw()
+        return
+    end
     local mine = saved
     saved = nil
-    restoring = true
     for _, f in ipairs(FILTERS) do
         if not mine[f] then SetTrainerServiceTypeFilter(f, false) end
     end
-    restoring = false
+    C_Timer.After(0, function()
+        busy = false
+        ReleaseRedraw()
+    end)
 end
 
-T.services = {}     -- [spell] = { index, type } for the open trainer
-T.prof = nil        -- profession of the open trainer
+T.services = {}
+T.prof = nil
 
--- Match every service to a recipe. Recipe names aren't unique (two "Faction Banner"s, two "Dark Leather
--- Boots"), so the item a service makes decides first - within the trainer's own profession - and the
--- name is only used for services that make no item.
-local function Scan()
-    if restoring then return end
+local function Read()
     wipe(T.services)
     T.prof = nil
     Index()
-    -- everything the trainer has, including what this character can't train yet
-    if OpenAllFilters() then
-        -- the list is rebuilt for the new filters: read on the next update instead
-        C_Timer.After(0.05, function() Scan() end)
-        return
-    end
     local db = SW.DB()
     local n = GetNumTrainerServices() or 0
 
-    -- 1. which profession is this trainer for? The one most of its item links belong to.
     local profCount = {}
     for i = 1, n do
-        local _, _, kind = GetTrainerServiceInfo(i)
+        local _, kind = ServiceInfo(i)
         local id = kind ~= "header" and LinkItem(i)
         for _, hit in ipairs(id and byItem[id] or {}) do profCount[hit[1]] = (profCount[hit[1]] or 0) + 1 end
     end
     local prof, bestN = nil, 0
     for p, c in pairs(profCount) do if c > bestN then prof, bestN = p, c end end
     if not prof then
-        -- an enchanting trainer's services make no items: fall back to names
         local nameCount = {}
         for i = 1, n do
-            local name, _, kind = GetTrainerServiceInfo(i)
+            local name, kind = ServiceInfo(i)
             if name and kind ~= "header" then
                 for p, names in pairs(byName) do
                     if names[name] then nameCount[p] = (nameCount[p] or 0) + 1 end
@@ -150,10 +162,9 @@ local function Scan()
     T.prof = prof
     T.Remember(prof)
 
-    -- 2. each service -> its recipe in that profession
     local learned = 0
     for i = 1, (prof and n or 0) do
-        local name, _, kind = GetTrainerServiceInfo(i)
+        local name, kind = ServiceInfo(i)
         if name and kind ~= "header" then
             local spell
             local id = LinkItem(i)
@@ -167,8 +178,6 @@ local function Scan()
                 local _, rank = GetTrainerServiceSkillReq(i)
                 local cost = GetTrainerServiceCost and GetTrainerServiceCost(i)
                 if rank and rank > 0 and db.learnRanks[spell] ~= rank then
-                    -- How far our estimate was from the game's own number: a measure of how much Forever
-                    -- moved away from what the recipe data implies.
                     local row = rowOf[spell]
                     if row and (row[4] or 0) == 0 then
                         local guess = math.max(1, (row[5] or 1) - 10)
@@ -186,7 +195,6 @@ local function Scan()
                     db.trainerCost = db.trainerCost or {}
                     db.trainerCost[spell] = cost
                 end
-                -- Abilities it asks for beyond the profession itself = a specialization.
                 local cp = SW.CharProf(prof)
                 for j = 1, GetTrainerServiceNumAbilityReq(i) or 0 do
                     local ability, has = GetTrainerServiceAbilityReq(i, j)
@@ -198,7 +206,6 @@ local function Scan()
             end
         end
     end
-    RestoreFilters()
     if learned > 0 then
         local d = db.drift
         SW.dbg("trainer: learned the required skill of %d recipes%s", learned,
@@ -208,7 +215,6 @@ local function Scan()
     SW.Fire("TRAINER_CHANGED")
 end
 
--- Services at the open trainer that the current route uses and can be learned now.
 function T.RouteServices(prof, route)
     local list = {}
     if not route or T.prof ~= prof then return list end
@@ -225,15 +231,47 @@ end
 
 function T.Train(list)
     if SW.CombatBlocked("train") then return end
-    -- Highest index first: learning a service can shift the ones after it.
-    table.sort(list, function(a, b) return a.index > b.index end)
-    for _, svc in ipairs(list) do BuyTrainerService(svc.index) end
+    -- BuyTrainerService is protected. Calling it from addon code produces
+    -- ADDON_ACTION_FORBIDDEN and poisons the default Train button (pets included).
+    local n = type(list) == "table" and #list or 0
+    if n == 0 then
+        SW.msg("nothing to train here - pick the recipe in the trainer window and click Train.")
+        return
+    end
+    SW.msg("the game will not let addons learn skills for you. In the trainer window, click |cffffd100Train|r for the highlighted recipe%s.", n == 1 and "" or "s")
+    C_Timer.After(0.5, function()
+        SW.Prof.ScanKnownSpells()
+        SW.Fire("RECIPES_CHANGED")
+    end)
 end
 
-SW.On("TRAINER_SHOW", function() SW.Debounce("trainer", 0.2, Scan) end)
-SW.On("TRAINER_UPDATE", function() SW.Debounce("trainer", 0.3, Scan) end)
+local function Scan()
+    if busy then return end
+    if not IsProfessionTrainer() then return end
+    Read()
+    if deepDone or SW.Settings().deepTrainerScan == false then return end
+    deepDone = true
+    if not OpenAllFilters() then return end
+    C_Timer.After(0.05, function()
+        Read()
+        RestoreFilters()
+        SW.Fire("TRAINER_CHANGED")
+    end)
+end
+
+SW.On("TRAINER_SHOW", function()
+    deepDone = false
+    if not IsProfessionTrainer() then return end
+    SW.Debounce("trainer", 0.2, Scan)
+end)
+SW.On("TRAINER_UPDATE", function()
+    if busy then return end
+    if not IsProfessionTrainer() then return end
+    SW.Debounce("trainer", 0.3, Scan)
+end)
 SW.On("TRAINER_CLOSED", function()
     RestoreFilters()
+    deepDone = false
     wipe(T.services)
     T.prof = nil
     SW.Fire("TRAINER_CHANGED")
